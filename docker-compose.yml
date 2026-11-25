@@ -1,0 +1,33 @@
+services:
+  control-plane:
+    build:
+      context: .
+      dockerfile: control-plane/Dockerfile
+    container_name: overwatch-control-plane
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_TOKEN=${APP_TOKEN}
+      - VAULT_KEY=${VAULT_KEY}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - HTTP_PROXY=http://egress-proxy:3128
+      - HTTPS_PROXY=http://egress-proxy:3128
+    networks:
+      - mgmt
+    depends_on:
+      - egress-proxy
+    restart: unless-stopped
+
+  egress-proxy:
+    image: ubuntu/squid:5.2-22.04_beta
+    container_name: overwatch-egress-proxy
+    volumes:
+      - ./infra/squid.conf:/etc/squid/squid.conf:ro
+    networks:
+      - mgmt
+    restart: unless-stopped
+
+networks:
+  mgmt:
+    name: overwatch-mgmt
+    driver: bridge
