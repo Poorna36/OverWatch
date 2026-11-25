@@ -5,44 +5,44 @@ import {
 } from 'react-native'
 import type { Decision, RiskTier, BandwidthTier, SessionState } from '../lib/mock-data'
 
-// ─── Design tokens — Catppuccin Mocha ─────────────────────────────────────────
+// ─── Design tokens — Claude Warm Charcoal & Terracotta ─────────────────────────
 export const T = {
   // Backgrounds
-  bg:        '#11111b', // crust
-  surface:   '#1e1e2e', // base
-  elevated:  '#181825', // mantle
-  overlay:   '#313244', // surface0
+  bg:        '#141413', // deep warm charcoal
+  surface:   '#1C1B19', // warm card surface
+  elevated:  '#242320', // elevated input / bar
+  overlay:   '#2E2C28', // modal / hover
 
   // Borders
-  border:    '#45475a', // surface1
-  borderMid: '#585b70', // surface2
+  border:    '#33312D', // subtle warm border
+  borderMid: '#45423C', // stronger border
 
   // Text
-  text:      '#cdd6f4', // text
-  textSub:   '#a6adc8', // subtext0
-  textDim:   '#6c7086', // overlay0
-  textFaint: '#45475a', // surface1
+  text:      '#F4F1EA', // warm parchment
+  textSub:   '#B0AAA0', // warm stone
+  textDim:   '#787268', // muted stone
+  textFaint: '#4A463F', // faint stone
 
-  // Accent — mauve as primary
-  indigo:    '#cba6f7', // mauve
-  indigoDim: '#2a1f3d', // mauve dim
-  violet:    '#b4befe', // lavender
-  violetDim: '#1e1f38', // lavender dim
+  // Accent — Claude terracotta / sienna
+  indigo:    '#D97757', // primary terracotta
+  indigoDim: '#332018', // terracotta dim
+  violet:    '#C98A6B', // warm clay
+  violetDim: '#2B201A', // clay dim
 
   // Semantic
-  green:     '#a6e3a1', // green
-  greenDim:  '#1a2b1a', // green dim
-  amber:     '#f9e2af', // yellow
-  amberDim:  '#2b2210', // yellow dim
-  red:       '#f38ba8', // red
-  redDim:    '#2b1420', // red dim
+  green:     '#6BBF8E', // warm sage green
+  greenDim:  '#17281E', // sage dim
+  amber:     '#E5A93C', // warm ochre
+  amberDim:  '#2C2210', // ochre dim
+  red:       '#E06C65', // warm coral red
+  redDim:    '#2D1817', // coral dim
 
-  // Extras (Catppuccin specific)
-  blue:      '#89b4fa', // blue
-  teal:      '#94e2d5', // teal
-  peach:     '#fab387', // peach
-  pink:      '#f5c2e7', // pink
-  sky:       '#89dceb', // sky
+  // Extras
+  blue:      '#7CA8D6',
+  teal:      '#6BBF8E',
+  peach:     '#E89B74',
+  pink:      '#D98A8C',
+  sky:       '#89B4D4',
 
   // Mono
   mono:      'monospace' as const,

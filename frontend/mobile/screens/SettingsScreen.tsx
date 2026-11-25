@@ -3,300 +3,227 @@ import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   SafeAreaView, StatusBar, Switch,
 } from 'react-native'
+import {
+  type EnvConfig, VM_IMAGES, VM_DEPS_OPTIONS, VM_INCLUDES_OPTIONS, VM_MCP_OPTIONS,
+} from '../lib/mock-data'
 import { T, PulseDot } from '../components/ui'
 
-export function SettingsScreen() {
-  const [googleConnected, setGoogleConnected] = useState(false)
+interface SettingsScreenProps {
+  env: EnvConfig
+  onChangeEnv: (env: EnvConfig) => void
+  userEmail: string
+  onLogout: () => void
+}
+
+export function SettingsScreen({ env, onChangeEnv, userEmail, onLogout }: SettingsScreenProps) {
+  const [googleConnected, setGoogleConnected] = useState(true)
   const [approvalNotifs, setApprovalNotifs] = useState(true)
-  const [connecting, setConnecting] = useState(false)
-  const [saved, setSaved] = useState(false)
 
-  async function connectGoogle() {
-    setConnecting(true)
-    await new Promise(r => setTimeout(r, 1400))
-    setGoogleConnected(true)
-    setConnecting(false)
+  function toggleItem(list: string[], item: string, key: 'vmDeps' | 'vmIncludes' | 'vmMcpAgents') {
+    const next = list.includes(item) ? list.filter(x => x !== item) : [...list, item]
+    onChangeEnv({ ...env, [key]: next })
   }
-
-  const metaRows = [
-    { label: 'Version', value: 'demo-0.1.0' },
-    { label: 'Build',   value: 'hackathon-2025' },
-    { label: 'Gateway', value: 'MCP + policy.yaml' },
-    { label: 'Auth',    value: 'Bearer token' },
-    { label: 'Profile', value: 'coding / general / daily_routine' },
-  ]
 
   return (
     <SafeAreaView style={s.safe}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
-
-        {/* Header */}
         <View style={s.header}>
           <Text style={s.heading}>Settings</Text>
-          <Text style={s.sub}>Control plane & integrations</Text>
+          <Text style={s.sub}>Workspace, VM config & connectors</Text>
         </View>
 
-        {/* Server connection */}
-        <SectionTitle label="Control Plane" />
+        {/* Account */}
+        <Text style={s.sectionLabel}>ACCOUNT (DEMO)</Text>
         <View style={s.card}>
-          <Row label="Server URL">
-            <Text style={s.valueText}>localhost:8000</Text>
-          </Row>
-          <Divider />
-          <Row label="Auth">
-            <Text style={s.valueText}>Bearer ••••••</Text>
-          </Row>
-          <Divider />
-          <View style={s.connRow}>
-            <View style={s.connDot}>
-              <PulseDot color={T.green} size={7} />
+          <View style={s.rowBetween}>
+            <View>
+              <Text style={s.rowTitle}>{userEmail}</Text>
+              <Text style={s.rowSub}>Signed in · Demo session</Text>
             </View>
-            <Text style={s.connText}>Connected · demo mode</Text>
-            <View style={{ flex: 1 }} />
-            <TouchableOpacity
-              style={s.saveBtn}
-              onPress={() => { setSaved(true); setTimeout(() => setSaved(false), 2000) }}
-              activeOpacity={0.8}
-            >
-              <Text style={s.saveBtnText}>{saved ? '✓ Saved' : 'Save'}</Text>
+            <TouchableOpacity style={s.logoutBtn} onPress={onLogout} activeOpacity={0.8}>
+              <Text style={s.logoutText}>Sign out</Text>
             </TouchableOpacity>
           </View>
         </View>
 
-        {/* Google */}
-        <SectionTitle label="Google Connector" badge="DEMO" />
+        {/* Environment Mode */}
+        <Text style={s.sectionLabel}>EXECUTION ENVIRONMENT</Text>
         <View style={s.card}>
-          <View style={s.googleRow}>
-            {/* Google G mark — real SVG-like using text */}
-            <View style={s.googleMark}>
-              <Text style={s.googleG}>G</Text>
-            </View>
-
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={s.googleTitle}>Calendar & Gmail</Text>
-              <Text style={s.googleSub}>
-                {googleConnected
-                  ? 'Connected — daily_routine profile active'
-                  : 'Enables the daily_routine agent profile'}
-              </Text>
-            </View>
-
+          <View style={s.modeRow}>
             <TouchableOpacity
-              style={[s.connectBtn, googleConnected && s.connectBtnDanger]}
-              onPress={googleConnected ? () => setGoogleConnected(false) : connectGoogle}
-              disabled={connecting}
-              activeOpacity={0.8}
+              style={[s.modeBtn, env.mode === 'desktop' && s.modeBtnActive]}
+              onPress={() => onChangeEnv({ ...env, mode: 'desktop' })}
             >
-              <Text style={[s.connectBtnText, googleConnected && { color: T.red }]}>
-                {connecting ? '…' : googleConnected ? 'Disconnect' : 'Connect'}
+              <PulseDot color={env.mode === 'desktop' ? T.green : T.textDim} size={6} />
+              <Text style={[s.modeText, env.mode === 'desktop' && s.modeTextActive]}>
+                Remote Desktop
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[s.modeBtn, env.mode === 'vm' && s.modeBtnActive]}
+              onPress={() => onChangeEnv({ ...env, mode: 'vm' })}
+            >
+              <Text style={[s.modeText, env.mode === 'vm' && s.modeTextActive]}>
+                Isolated VM
               </Text>
             </TouchableOpacity>
           </View>
 
-          {googleConnected && (
-            <View style={s.permsList}>
-              {[
-                '✓  Calendar — read access',
-                '✓  Gmail — compose drafts only',
-                '·   Send requires explicit user tap',
-                '·   Tokens revoked on session End',
-              ].map((line, i) => (
-                <Text key={i} style={[s.permLine, line.startsWith('✓') && { color: T.green + 'cc' }]}>
-                  {line}
-                </Text>
-              ))}
+          {env.mode === 'desktop' ? (
+            <Text style={s.envNote}>
+              Active bridge: <Text style={{ color: T.text }}>{env.desktopHost}</Text>
+            </Text>
+          ) : (
+            <View style={{ gap: 10, marginTop: 6 }}>
+              <Text style={s.subLabel}>VM IMAGE</Text>
+              <View style={s.chipWrap}>
+                {VM_IMAGES.map(img => (
+                  <TouchableOpacity
+                    key={img.id}
+                    style={[s.chip, env.vmImage === img.id && s.chipActive]}
+                    onPress={() => onChangeEnv({ ...env, vmImage: img.id })}
+                  >
+                    <Text style={[s.chipText, env.vmImage === img.id && s.chipTextActive]}>
+                      {img.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={s.subLabel}>DEPENDENCIES</Text>
+              <View style={s.chipWrap}>
+                {VM_DEPS_OPTIONS.map(dep => {
+                  const on = env.vmDeps.includes(dep)
+                  return (
+                    <TouchableOpacity
+                      key={dep}
+                      style={[s.chip, on && s.chipActive]}
+                      onPress={() => toggleItem(env.vmDeps, dep, 'vmDeps')}
+                    >
+                      <Text style={[s.chipText, on && s.chipTextActive]}>{dep}</Text>
+                    </TouchableOpacity>
+                  )
+                })}
+              </View>
+
+              <Text style={s.subLabel}>INCLUDE MOUNTS</Text>
+              <View style={s.chipWrap}>
+                {VM_INCLUDES_OPTIONS.map(inc => {
+                  const on = env.vmIncludes.includes(inc)
+                  return (
+                    <TouchableOpacity
+                      key={inc}
+                      style={[s.chip, on && s.chipActive]}
+                      onPress={() => toggleItem(env.vmIncludes, inc, 'vmIncludes')}
+                    >
+                      <Text style={[s.chipText, on && s.chipTextActive]}>{inc}</Text>
+                    </TouchableOpacity>
+                  )
+                })}
+              </View>
+
+              <Text style={s.subLabel}>MCP AGENTS</Text>
+              <View style={s.chipWrap}>
+                {VM_MCP_OPTIONS.map(mcp => {
+                  const on = env.vmMcpAgents.includes(mcp)
+                  return (
+                    <TouchableOpacity
+                      key={mcp}
+                      style={[s.chip, on && s.chipActive]}
+                      onPress={() => toggleItem(env.vmMcpAgents, mcp, 'vmMcpAgents')}
+                    >
+                      <Text style={[s.chipText, on && s.chipTextActive]}>{mcp}</Text>
+                    </TouchableOpacity>
+                  )
+                })}
+              </View>
             </View>
           )}
         </View>
 
-        {/* Notifications */}
-        <SectionTitle label="Notifications" />
+        {/* Connectors & Notifications */}
+        <Text style={s.sectionLabel}>CONNECTORS & ALERTS</Text>
         <View style={s.card}>
-          <View style={s.switchRow}>
+          <View style={s.rowBetween}>
             <View>
-              <Text style={s.switchTitle}>Approval alerts</Text>
-              <Text style={s.switchDesc}>Notify when the agent needs your tap</Text>
+              <Text style={s.rowTitle}>Google Calendar & Gmail</Text>
+              <Text style={s.rowSub}>
+                {googleConnected ? 'Connected · Calendar & Reminders active' : 'Disconnected'}
+              </Text>
+            </View>
+            <Switch
+              value={googleConnected}
+              onValueChange={setGoogleConnected}
+              trackColor={{ false: T.border, true: T.indigo + '88' }}
+              thumbColor={googleConnected ? T.indigo : T.textDim}
+            />
+          </View>
+          <View style={s.divider} />
+          <View style={s.rowBetween}>
+            <View>
+              <Text style={s.rowTitle}>Approval prompts</Text>
+              <Text style={s.rowSub}>Pause before external form submit or send</Text>
             </View>
             <Switch
               value={approvalNotifs}
               onValueChange={setApprovalNotifs}
-              trackColor={{ false: T.border, true: T.indigo }}
-              thumbColor="#fff"
-              ios_backgroundColor={T.border}
-            />
-          </View>
-          <Divider />
-          <View style={[s.switchRow, { opacity: 0.4 }]}>
-            <View>
-              <Text style={s.switchTitle}>Session updates</Text>
-              <Text style={s.switchDesc}>State changes and completions</Text>
-            </View>
-            <Switch
-              value={false}
-              trackColor={{ false: T.border, true: T.indigo }}
-              thumbColor="#fff"
+              trackColor={{ false: T.border, true: T.indigo + '88' }}
+              thumbColor={approvalNotifs ? T.indigo : T.textDim}
             />
           </View>
         </View>
-
-        {/* Gateway policy */}
-        <SectionTitle label="MCP Gateway" />
-        <View style={s.card}>
-          {[
-            { icon: '✓', label: 'Policy engine', value: 'allow / ask / block', color: T.green },
-            { icon: '◫', label: 'Path jail', value: '/workspace only', color: T.indigo },
-            { icon: '◎', label: 'Egress proxy', value: 'allowlist enforced', color: T.indigo },
-            { icon: '⌛', label: 'Tool timeout', value: '30s default', color: T.textSub },
-            { icon: '◈', label: 'Audit chain', value: 'SHA-256 hash-chained', color: T.textSub },
-          ].map((row, i, arr) => (
-            <View key={row.label}>
-              <View style={s.policyRow}>
-                <Text style={[s.policyIcon, { color: row.color }]}>{row.icon}</Text>
-                <Text style={s.policyLabel}>{row.label}</Text>
-                <Text style={s.policyValue}>{row.value}</Text>
-              </View>
-              {i < arr.length - 1 && <Divider />}
-            </View>
-          ))}
-        </View>
-
-        {/* About */}
-        <SectionTitle label="About" />
-        <View style={s.card}>
-          {metaRows.map((row, i) => (
-            <View key={row.label}>
-              <Row label={row.label}>
-                <Text style={s.valueText}>{row.value}</Text>
-              </Row>
-              {i < metaRows.length - 1 && <Divider />}
-            </View>
-          ))}
-        </View>
-
-        {/* Tagline */}
-        <Text style={s.tagline}>
-          Overwatch — Sandboxed MCP agents{'\n'}
-          with a policy gateway and remote control
-        </Text>
       </ScrollView>
     </SafeAreaView>
   )
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function SectionTitle({ label, badge }: { label: string; badge?: string }) {
-  return (
-    <View style={s.sectionRow}>
-      <Text style={s.sectionLabel}>{label.toUpperCase()}</Text>
-      {badge && (
-        <View style={s.sectionBadge}>
-          <Text style={s.sectionBadgeText}>{badge}</Text>
-        </View>
-      )}
-    </View>
-  )
-}
-
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <View style={s.row}>
-      <Text style={s.rowLabel}>{label}</Text>
-      {children}
-    </View>
-  )
-}
-
-function Divider() {
-  return <View style={s.divider} />
-}
-
 const s = StyleSheet.create({
   safe: { flex: 1, backgroundColor: T.bg },
-  content: { paddingBottom: 70 },
+  content: { padding: 16, paddingBottom: 44 },
 
-  header: { paddingHorizontal: 24, paddingTop: 20, paddingBottom: 20 },
-  heading: { color: T.text, fontSize: 26, fontWeight: '800', letterSpacing: -0.8 },
-  sub: { color: T.textDim, fontSize: 13, marginTop: 2 },
+  header: { marginBottom: 18, marginTop: 4 },
+  heading: { color: T.text, fontSize: 24, fontWeight: '700', letterSpacing: -0.4 },
+  sub: { color: T.textDim, fontSize: 12, marginTop: 2 },
 
-  sectionRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: 20, paddingTop: 20, paddingBottom: 10,
-  },
   sectionLabel: {
-    color: T.textDim, fontSize: 11, fontWeight: '700', letterSpacing: 1.5,
+    color: T.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 1,
+    marginBottom: 8, marginTop: 14,
   },
-  sectionBadge: {
-    backgroundColor: T.violetDim, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2,
-    borderWidth: 1, borderColor: T.violet + '40',
-  },
-  sectionBadgeText: { color: T.violet, fontSize: 9, fontWeight: '800' },
+  subLabel: { color: T.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 0.8, marginTop: 4 },
 
   card: {
-    marginHorizontal: 16, backgroundColor: T.surface,
-    borderRadius: 18, borderWidth: 1, borderColor: T.border,
-    overflow: 'hidden',
+    backgroundColor: T.surface, borderRadius: 16,
+    borderWidth: 1, borderColor: T.border, padding: 14, gap: 10,
   },
+  rowBetween: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  rowTitle: { color: T.text, fontSize: 14, fontWeight: '600' },
+  rowSub: { color: T.textDim, fontSize: 12, marginTop: 2 },
+  divider: { height: 1, backgroundColor: T.border },
 
-  row: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingVertical: 13,
+  logoutBtn: {
+    backgroundColor: T.redDim, borderWidth: 1, borderColor: T.red + '44',
+    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10,
   },
-  rowLabel: { color: T.textSub, fontSize: 13 },
-  valueText: { color: T.textDim, fontSize: 12, fontFamily: T.mono },
-  divider: { height: 1, backgroundColor: T.border, marginHorizontal: 16 },
+  logoutText: { color: T.red, fontSize: 12, fontWeight: '700' },
 
-  connRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: 16, paddingVertical: 10,
+  modeRow: { flexDirection: 'row', gap: 8 },
+  modeBtn: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    backgroundColor: T.elevated, borderWidth: 1, borderColor: T.border,
+    paddingVertical: 10, borderRadius: 12,
   },
-  connDot: { width: 20, alignItems: 'center' },
-  connText: { color: T.green, fontSize: 12 },
-  saveBtn: {
-    backgroundColor: T.indigoDim, borderWidth: 1, borderColor: T.indigo + '40',
-    borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6,
-  },
-  saveBtnText: { color: T.indigo, fontSize: 12, fontWeight: '700' },
+  modeBtnActive: { borderColor: T.indigo, backgroundColor: T.indigoDim },
+  modeText: { color: T.textSub, fontSize: 13, fontWeight: '600' },
+  modeTextActive: { color: T.indigo, fontWeight: '700' },
+  envNote: { color: T.textSub, fontSize: 12 },
 
-  googleRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 12, padding: 16,
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 7 },
+  chip: {
+    backgroundColor: T.elevated, borderWidth: 1, borderColor: T.border,
+    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
   },
-  googleMark: {
-    width: 38, height: 38, borderRadius: 10, backgroundColor: '#fff',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  googleG: { fontSize: 22, fontWeight: '900', color: '#4285F4' },
-  googleTitle: { color: T.text, fontSize: 14, fontWeight: '600' },
-  googleSub: { color: T.textDim, fontSize: 11 },
-  connectBtn: {
-    backgroundColor: T.surface, borderWidth: 1, borderColor: T.border,
-    borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6,
-  },
-  connectBtnDanger: { borderColor: T.red + '40', backgroundColor: T.redDim },
-  connectBtnText: { color: T.textSub, fontSize: 12, fontWeight: '700' },
-  permsList: {
-    borderTopWidth: 1, borderTopColor: T.border,
-    padding: 14, gap: 5,
-  },
-  permLine: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-
-  switchRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    padding: 16, gap: 16,
-  },
-  switchTitle: { color: T.text, fontSize: 14, fontWeight: '500' },
-  switchDesc: { color: T.textDim, fontSize: 11, marginTop: 2 },
-
-  policyRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingHorizontal: 16, paddingVertical: 12,
-  },
-  policyIcon: { fontSize: 14, width: 18, textAlign: 'center' },
-  policyLabel: { color: T.textSub, fontSize: 13, flex: 1 },
-  policyValue: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-
-  tagline: {
-    color: T.textFaint, fontSize: 11, textAlign: 'center',
-    lineHeight: 18, marginTop: 32, marginBottom: 20,
-  },
+  chipActive: { borderColor: T.indigo, backgroundColor: T.indigoDim },
+  chipText: { color: T.textSub, fontSize: 12 },
+  chipTextActive: { color: T.indigo, fontWeight: '600' },
 })

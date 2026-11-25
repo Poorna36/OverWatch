@@ -263,8 +263,8 @@ export function SessionScreen({ navigation, route }: SessionScreenProps) {
               <View style={ss.endedCard}>
                 <Text style={ss.endedTitle}>Workspace destroyed</Text>
                 <Text style={ss.endedSub}>Container removed · credentials revoked · audit chain sealed</Text>
-                <TouchableOpacity onPress={() => navigation.navigate('AuditTab')} style={{ marginTop: 10 }}>
-                  <Text style={ss.endedLink}>View audit receipt →</Text>
+                <TouchableOpacity onPress={() => navigation.navigate('TasksTab')} style={{ marginTop: 10 }}>
+                  <Text style={ss.endedLink}>View tasks & audit →</Text>
                 </TouchableOpacity>
               </View>
             ) : undefined
