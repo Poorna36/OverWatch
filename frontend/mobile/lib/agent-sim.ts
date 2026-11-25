@@ -92,7 +92,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Calendar Deadlines & Reminders',
       steps: [
         {
-          delayMs: 3200,
+          delayMs: 2950,
           statusLabel: `Executing task — opening Calendar on ${targetEnv}...`,
           toolCall: {
             tool: 'calendar.open',
@@ -110,7 +110,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 3800,
+          delayMs: 4450,
           statusLabel: 'Executing task — browsing Reminders & due dates...',
           toolCall: {
             tool: 'reminders.scan',
@@ -160,7 +160,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Application Form Assistant',
       steps: [
         {
-          delayMs: 3300,
+          delayMs: 3650,
           statusLabel: `Executing task — opening ${targetUrl} on ${targetEnv}...`,
           toolCall: {
             tool: 'browser.navigate',
@@ -178,7 +178,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 4000,
+          delayMs: 4750,
           statusLabel: 'Executing task — filling form fields from profile...',
           toolCall: {
             tool: 'browser.fill_fields',
@@ -253,7 +253,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 4200,
+          delayMs: 4850,
           statusLabel: 'Executing task — running pytest test suite...',
           toolCall: {
             tool: 'terminal.run',

@@ -10,20 +10,31 @@ const NAV = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
 
-export function Sidebar() {
+export function Sidebar({ onCollapse }: { onCollapse?: () => void }) {
   return (
     <aside className="w-56 shrink-0 flex flex-col border-r border-[#313244]/60 bg-[#11111b]/90 glass">
-      {/* Logo */}
-      <div className="px-5 py-5 border-b border-[#313244]/60">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-[#cba6f7] flex items-center justify-center shrink-0">
-            <EyeIcon className="w-4 h-4 text-[#11111b]" />
+      {/* Logo + collapse toggle */}
+      <div className="px-4 py-4 border-b border-[#313244]/60 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-[#D97757] flex items-center justify-center shrink-0">
+            <EyeIcon className="w-4 h-4 text-[#141413]" />
           </div>
-          <div>
-            <p className="text-sm font-bold text-[#cdd6f4] leading-none">Overwatch</p>
-            <p className="text-[10px] text-[#6c7086] mt-0.5">MCP Control Plane</p>
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#F4F1EA] leading-none">Overwatch</p>
+            <p className="text-[10px] text-[#787268] mt-0.5">MCP Control Plane</p>
           </div>
         </div>
+        {onCollapse && (
+          <button
+            onClick={onCollapse}
+            title="Hide sidebar"
+            className="p-1.5 rounded-md text-[#787268] hover:text-[#F4F1EA] hover:bg-[#242320] transition-colors shrink-0"
+          >
+            <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Nav */}
@@ -36,8 +47,8 @@ export function Sidebar() {
             className={({ isActive }) => cn(
               'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all',
               isActive
-                ? 'bg-[#cba6f7]/15 text-[#cba6f7] font-medium'
-                : 'text-[#6c7086] hover:text-[#cdd6f4] hover:bg-[#313244]/60',
+                ? 'bg-[#D97757]/15 text-[#D97757] font-medium'
+                : 'text-[#787268] hover:text-[#F4F1EA] hover:bg-[#242320]',
             )}
           >
             <Icon className="w-4 h-4 shrink-0" />

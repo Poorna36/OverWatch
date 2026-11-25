@@ -125,6 +125,31 @@ const SCENARIOS: DemoScenario[] = [
     ],
     reply: 'Resumed Python build (14 tests passed). Status sent to Phone.',
   },
+  {
+    id: 'research',
+    label: 'Research & Gmail Draft',
+    prompt: 'Research MCP sandboxing papers, summarize findings and email my mentor',
+    windowTitle: 'Remote Desktop — Browser + Gmail',
+    steps: [
+      {
+        tool: 'browser.search',
+        detail: 'Searching arXiv & MCP spec on sandboxing',
+        screenLines: [
+          '> Searching arXiv & modelcontextprotocol.io...',
+          '  Parsed 3 key security takeaways',
+        ],
+      },
+      {
+        tool: 'gmail.create_draft',
+        detail: 'Drafted email to mentor@university.edu',
+        screenLines: [
+          '> Composing Gmail draft (dr_8841)...',
+          '[BLOCKED] gmail.send denied in Research mode — draft saved',
+        ],
+      },
+    ],
+    reply: 'Saved Gmail draft safely (auto-send blocked). Ready for review.',
+  },
 ]
 
 export function MobileBridgePopup() {
