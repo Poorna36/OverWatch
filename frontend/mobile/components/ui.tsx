@@ -1,162 +1,218 @@
-import React from 'react'
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native'
+import React, { useEffect, useRef } from 'react'
+import {
+  View, Text, StyleSheet, TouchableOpacity, Animated,
+  ViewStyle, TextStyle,
+} from 'react-native'
 import type { Decision, RiskTier, BandwidthTier, SessionState } from '../lib/mock-data'
 
-// ─── Colors ──────────────────────────────────────────────────────────────────
-export const C = {
-  bg: '#09090b',
-  surface: '#111113',
-  surface2: '#18181b',
-  border: '#27272a',
-  borderSubtle: '#1c1c1f',
-  text: '#fafafa',
-  textMuted: '#71717a',
-  textSubtle: '#3f3f46',
-  accent: '#818cf8',
-  accentDim: '#312e81',
-  green: '#34d399',
-  amber: '#fbbf24',
-  red: '#f87171',
-  indigo: '#6366f1',
-  violet: '#8b5cf6',
+// ─── Design tokens ────────────────────────────────────────────────────────────
+export const T = {
+  // Backgrounds
+  bg:        '#09090b',
+  surface:   '#0f0f12',
+  elevated:  '#16161a',
+  overlay:   '#1c1c22',
+
+  // Borders
+  border:    '#222228',
+  borderMid: '#2e2e38',
+
+  // Text
+  text:      '#f1f1f3',
+  textSub:   '#8888a0',
+  textDim:   '#44445a',
+  textFaint: '#2a2a3a',
+
+  // Accent
+  indigo:    '#6366f1',
+  indigoDim: '#1e1e35',
+  violet:    '#8b5cf6',
+  violetDim: '#1a1428',
+
+  // Semantic
+  green:     '#22d3a4',
+  greenDim:  '#0a1f19',
+  amber:     '#f59e0b',
+  amberDim:  '#1f1500',
+  red:       '#f43f5e',
+  redDim:    '#1f0812',
+
+  // Mono
+  mono:      'monospace' as const,
 }
 
-// ─── Status dot ──────────────────────────────────────────────────────────────
-interface StatusDotProps { state: SessionState; size?: number }
+// ─── Animated pulse dot (for ACTIVE state) ────────────────────────────────────
+export function PulseDot({ color = T.green, size = 8 }: { color?: string; size?: number }) {
+  const scale = useRef(new Animated.Value(1)).current
+  const opacity = useRef(new Animated.Value(0.6)).current
 
-export function StatusDot({ state, size = 8 }: StatusDotProps) {
-  const color: Record<SessionState, string> = {
-    ACTIVE: C.green, PAUSED: C.amber, ENDED: C.textMuted,
-    FAILED: C.red, STARTING: C.accent, PLANNING: C.violet,
-    CREATED: C.textSubtle, ENDING: C.textSubtle,
+  useEffect(() => {
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.parallel([
+          Animated.timing(scale, { toValue: 1.8, duration: 900, useNativeDriver: true }),
+          Animated.timing(opacity, { toValue: 0, duration: 900, useNativeDriver: true }),
+        ]),
+        Animated.parallel([
+          Animated.timing(scale, { toValue: 1, duration: 0, useNativeDriver: true }),
+          Animated.timing(opacity, { toValue: 0.6, duration: 0, useNativeDriver: true }),
+        ]),
+      ])
+    )
+    anim.start()
+    return () => anim.stop()
+  }, [])
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{
+        position: 'absolute', width: size, height: size,
+        borderRadius: size / 2, backgroundColor: color,
+        transform: [{ scale }], opacity,
+      }} />
+      <View style={{ width: size * 0.65, height: size * 0.65, borderRadius: size, backgroundColor: color }} />
+    </View>
+  )
+}
+
+// ─── Status indicator ─────────────────────────────────────────────────────────
+export function StateChip({ state }: { state: SessionState }) {
+  const cfg: Record<SessionState, { color: string; bg: string; label: string; pulse: boolean }> = {
+    ACTIVE:   { color: T.green,  bg: T.greenDim,  label: 'Active',   pulse: true },
+    PAUSED:   { color: T.amber,  bg: T.amberDim,  label: 'Paused',   pulse: false },
+    STARTING: { color: T.indigo, bg: T.indigoDim, label: 'Starting', pulse: true },
+    PLANNING: { color: T.violet, bg: T.violetDim, label: 'Planning', pulse: true },
+    ENDED:    { color: T.textDim,bg: T.surface,   label: 'Ended',    pulse: false },
+    FAILED:   { color: T.red,    bg: T.redDim,    label: 'Failed',   pulse: false },
+    CREATED:  { color: T.textDim,bg: T.surface,   label: 'Created',  pulse: false },
+    ENDING:   { color: T.textDim,bg: T.surface,   label: 'Ending',   pulse: false },
   }
-  return <View style={[styles.dot, { width: size, height: size, borderRadius: size / 2, backgroundColor: color[state] }]} />
+  const { color, bg, label, pulse } = cfg[state]
+  return (
+    <View style={[u.chip, { backgroundColor: bg, borderColor: color + '44' }]}>
+      {pulse ? <PulseDot color={color} size={6} /> : <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />}
+      <Text style={[u.chipText, { color }]}>{label}</Text>
+    </View>
+  )
 }
 
-// ─── Decision badge ───────────────────────────────────────────────────────────
-interface DecisionBadgeProps { decision: Decision }
-
-export function DecisionBadge({ decision }: DecisionBadgeProps) {
+// ─── Decision pill ────────────────────────────────────────────────────────────
+export function DecisionPill({ decision }: { decision: Decision }) {
   const cfg = {
-    allow: { color: C.green, bg: '#052e1611', border: '#34d39930', icon: '✓', label: 'Allowed' },
-    ask:   { color: C.amber, bg: '#451a0311', border: '#fbbf2430', icon: '⚠', label: 'Ask' },
-    block: { color: C.red,   bg: '#450a0a11', border: '#f8717130', icon: '✕', label: 'Blocked' },
+    allow: { color: T.green, bg: T.greenDim, border: T.green + '30', symbol: '✓', label: 'allowed' },
+    ask:   { color: T.amber, bg: T.amberDim, border: T.amber + '30', symbol: '?', label: 'ask' },
+    block: { color: T.red,   bg: T.redDim,   border: T.red   + '30', symbol: '✕', label: 'blocked' },
   }[decision]
-
   return (
-    <View style={[styles.badge, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
-      <Text style={[styles.badgeText, { color: cfg.color }]}>{cfg.icon} {cfg.label}</Text>
+    <View style={[u.pill, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
+      <Text style={[u.pillText, { color: cfg.color }]}>{cfg.symbol} {cfg.label}</Text>
     </View>
   )
 }
 
-// ─── Risk badge ───────────────────────────────────────────────────────────────
-interface RiskBadgeProps { tier: RiskTier }
-
-export function RiskBadge({ tier }: RiskBadgeProps) {
+// ─── Risk tag ─────────────────────────────────────────────────────────────────
+export function RiskTag({ tier }: { tier: RiskTier }) {
   const cfg = {
-    safe:      { color: C.textMuted, bg: '#27272a44', border: C.border },
-    sensitive: { color: C.amber,     bg: '#451a0311', border: '#fbbf2430' },
-    critical:  { color: C.red,       bg: '#450a0a11', border: '#f8717130' },
+    safe:      { color: T.textDim, label: 'safe' },
+    sensitive: { color: T.amber,   label: 'sensitive' },
+    critical:  { color: T.red,     label: 'critical' },
   }[tier]
+  return <Text style={[u.riskTag, { color: cfg.color }]}>{cfg.label}</Text>
+}
 
+// ─── Tier indicator ───────────────────────────────────────────────────────────
+export function TierDot({ tier }: { tier: BandwidthTier }) {
+  const color = { video: T.indigo, screenshots: T.violet, text: T.textDim }[tier]
+  const label = { video: 'video', screenshots: 'screen', text: 'text' }[tier]
   return (
-    <View style={[styles.badge, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
-      <Text style={[styles.badgeText, { color: cfg.color }]}>{tier}</Text>
+    <View style={u.tierWrap}>
+      <View style={[u.tierDot, { backgroundColor: color }]} />
+      <Text style={[u.tierLabel, { color }]}>{label}</Text>
     </View>
   )
 }
 
-// ─── Tier badge ───────────────────────────────────────────────────────────────
-interface TierBadgeProps { tier: BandwidthTier }
-
-export function TierBadge({ tier }: TierBadgeProps) {
-  const cfg = {
-    video:       { color: C.accent,   bg: '#312e8122', border: '#818cf830', icon: '▶' },
-    screenshots: { color: C.violet,   bg: '#2e1065aa', border: '#8b5cf630', icon: '◉' },
-    text:        { color: C.textMuted, bg: '#27272a44', border: C.border,   icon: '≡' },
-  }[tier]
-
-  return (
-    <View style={[styles.badge, { backgroundColor: cfg.bg, borderColor: cfg.border }]}>
-      <Text style={[styles.badgeText, { color: cfg.color }]}>{cfg.icon} {tier}</Text>
-    </View>
-  )
-}
-
-// ─── Budget bar ───────────────────────────────────────────────────────────────
-interface BudgetBarProps { used: number; total: number; costUsd: number }
-
-export function BudgetBar({ used, total, costUsd }: BudgetBarProps) {
+// ─── Budget strip ─────────────────────────────────────────────────────────────
+export function BudgetStrip({ used, total, costUsd }: { used: number; total: number; costUsd: number }) {
   const pct = Math.min((used / total) * 100, 100)
-  const fillColor = pct > 80 ? C.red : pct > 60 ? C.amber : C.indigo
-
+  const color = pct > 80 ? T.red : pct > 55 ? T.amber : T.indigo
   return (
-    <View style={styles.budgetWrap}>
-      <View style={styles.budgetHeader}>
-        <Text style={styles.budgetLabel}>Budget</Text>
-        <Text style={styles.budgetValue}>{used}/{total} · ${costUsd.toFixed(3)}</Text>
+    <View style={u.budgetRow}>
+      <View style={u.budgetTrack}>
+        <View style={[u.budgetFill, { width: `${pct}%` as any, backgroundColor: color }]} />
       </View>
-      <View style={styles.budgetTrack}>
-        <View style={[styles.budgetFill, { width: `${pct}%` as any, backgroundColor: fillColor }]} />
-      </View>
+      <Text style={u.budgetLabel}>{used}/{total} · ${costUsd.toFixed(3)}</Text>
     </View>
   )
 }
 
-// ─── Button ───────────────────────────────────────────────────────────────────
-interface ButtonProps {
+// ─── Ghost button ─────────────────────────────────────────────────────────────
+interface GhostBtnProps {
   label: string
   onPress: () => void
-  variant?: 'primary' | 'outline' | 'danger' | 'success'
-  size?: 'sm' | 'md'
-  disabled?: boolean
+  color?: string
+  style?: ViewStyle
 }
-
-export function Btn({ label, onPress, variant = 'primary', size = 'md', disabled }: ButtonProps) {
-  const cfg = {
-    primary: { bg: C.indigo,  border: C.indigo,       text: '#fff' },
-    outline: { bg: 'transparent', border: C.border,   text: C.textMuted },
-    danger:  { bg: '#450a0a44', border: '#f8717144',  text: C.red },
-    success: { bg: '#05261644', border: '#34d39944',  text: C.green },
-  }[variant]
-
-  const pad = size === 'sm' ? { paddingVertical: 6, paddingHorizontal: 12 } : { paddingVertical: 10, paddingHorizontal: 18 }
-  const fontSize = size === 'sm' ? 12 : 14
-
+export function GhostBtn({ label, onPress, color = T.textSub, style }: GhostBtnProps) {
   return (
-    <TouchableOpacity
-      onPress={onPress}
-      disabled={disabled}
-      activeOpacity={0.75}
-      style={[styles.btn, pad, { backgroundColor: cfg.bg, borderColor: cfg.border, opacity: disabled ? 0.4 : 1 }]}
-    >
-      <Text style={[styles.btnText, { color: cfg.text, fontSize }]}>{label}</Text>
+    <TouchableOpacity onPress={onPress} activeOpacity={0.7} style={[u.ghostBtn, style]}>
+      <Text style={[u.ghostBtnText, { color }]}>{label}</Text>
     </TouchableOpacity>
   )
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-const styles = StyleSheet.create({
-  dot: {},
-  badge: {
-    borderWidth: 1,
-    borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    alignSelf: 'flex-start',
+// ─── Primary button ───────────────────────────────────────────────────────────
+export function PrimaryBtn({ label, onPress, loading, disabled }: {
+  label: string; onPress: () => void; loading?: boolean; disabled?: boolean
+}) {
+  return (
+    <TouchableOpacity
+      onPress={onPress} activeOpacity={0.85}
+      disabled={disabled || loading}
+      style={[u.primaryBtn, (disabled || loading) && { opacity: 0.4 }]}
+    >
+      <Text style={u.primaryBtnText}>{loading ? '…' : label}</Text>
+    </TouchableOpacity>
+  )
+}
+
+// ─── Shared styles ────────────────────────────────────────────────────────────
+export const u = StyleSheet.create({
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderRadius: 999, borderWidth: 1,
   },
-  badgeText: {
-    fontSize: 10,
-    fontFamily: 'monospace',
-    fontWeight: '600',
+  chipText: { fontSize: 11, fontWeight: '700', letterSpacing: 0.3 },
+
+  pill: {
+    paddingHorizontal: 7, paddingVertical: 3,
+    borderRadius: 6, borderWidth: 1, alignSelf: 'flex-start',
   },
-  budgetWrap: { gap: 4 },
-  budgetHeader: { flexDirection: 'row', justifyContent: 'space-between' },
-  budgetLabel: { fontSize: 10, color: C.textMuted, fontFamily: 'monospace' },
-  budgetValue: { fontSize: 10, color: C.textMuted, fontFamily: 'monospace' },
-  budgetTrack: { height: 3, backgroundColor: C.surface2, borderRadius: 2, overflow: 'hidden' },
-  budgetFill: { height: 3, borderRadius: 2 },
-  btn: { borderWidth: 1, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
-  btnText: { fontWeight: '600', letterSpacing: 0.1 },
+  pillText: { fontSize: 10, fontWeight: '700', fontFamily: T.mono },
+
+  riskTag: { fontSize: 10, fontFamily: T.mono, opacity: 0.8 },
+
+  tierWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  tierDot: { width: 5, height: 5, borderRadius: 3 },
+  tierLabel: { fontSize: 10, fontWeight: '600', letterSpacing: 0.5 },
+
+  budgetRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  budgetTrack: { flex: 1, height: 2, backgroundColor: T.border, borderRadius: 1 },
+  budgetFill: { height: 2, borderRadius: 1 },
+  budgetLabel: { fontSize: 10, color: T.textDim, fontFamily: T.mono },
+
+  ghostBtn: {
+    paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: 10, borderWidth: 1, borderColor: T.border,
+    backgroundColor: T.surface,
+  },
+  ghostBtnText: { fontSize: 13, fontWeight: '600' },
+
+  primaryBtn: {
+    backgroundColor: T.indigo,
+    borderRadius: 14, paddingVertical: 15,
+    alignItems: 'center',
+  },
+  primaryBtnText: { color: '#fff', fontSize: 15, fontWeight: '700', letterSpacing: 0.2 },
 })
