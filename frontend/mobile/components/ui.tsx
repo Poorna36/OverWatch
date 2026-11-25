@@ -5,37 +5,44 @@ import {
 } from 'react-native'
 import type { Decision, RiskTier, BandwidthTier, SessionState } from '../lib/mock-data'
 
-// ─── Design tokens ────────────────────────────────────────────────────────────
+// ─── Design tokens — Catppuccin Mocha ─────────────────────────────────────────
 export const T = {
   // Backgrounds
-  bg:        '#09090b',
-  surface:   '#0f0f12',
-  elevated:  '#16161a',
-  overlay:   '#1c1c22',
+  bg:        '#11111b', // crust
+  surface:   '#1e1e2e', // base
+  elevated:  '#181825', // mantle
+  overlay:   '#313244', // surface0
 
   // Borders
-  border:    '#222228',
-  borderMid: '#2e2e38',
+  border:    '#45475a', // surface1
+  borderMid: '#585b70', // surface2
 
   // Text
-  text:      '#f1f1f3',
-  textSub:   '#8888a0',
-  textDim:   '#44445a',
-  textFaint: '#2a2a3a',
+  text:      '#cdd6f4', // text
+  textSub:   '#a6adc8', // subtext0
+  textDim:   '#6c7086', // overlay0
+  textFaint: '#45475a', // surface1
 
-  // Accent
-  indigo:    '#6366f1',
-  indigoDim: '#1e1e35',
-  violet:    '#8b5cf6',
-  violetDim: '#1a1428',
+  // Accent — mauve as primary
+  indigo:    '#cba6f7', // mauve
+  indigoDim: '#2a1f3d', // mauve dim
+  violet:    '#b4befe', // lavender
+  violetDim: '#1e1f38', // lavender dim
 
   // Semantic
-  green:     '#22d3a4',
-  greenDim:  '#0a1f19',
-  amber:     '#f59e0b',
-  amberDim:  '#1f1500',
-  red:       '#f43f5e',
-  redDim:    '#1f0812',
+  green:     '#a6e3a1', // green
+  greenDim:  '#1a2b1a', // green dim
+  amber:     '#f9e2af', // yellow
+  amberDim:  '#2b2210', // yellow dim
+  red:       '#f38ba8', // red
+  redDim:    '#2b1420', // red dim
+
+  // Extras (Catppuccin specific)
+  blue:      '#89b4fa', // blue
+  teal:      '#94e2d5', // teal
+  peach:     '#fab387', // peach
+  pink:      '#f5c2e7', // pink
+  sky:       '#89dceb', // sky
 
   // Mono
   mono:      'monospace' as const,

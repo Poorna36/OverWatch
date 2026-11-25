@@ -1,20 +1,28 @@
 @import "tailwindcss";
 
 @layer base {
+  /* ── Catppuccin Mocha ───────────────────────────────────────── */
   :root {
-    --color-bg: #09090b;
-    --color-surface: #111113;
-    --color-surface-2: #18181b;
-    --color-border: #27272a;
-    --color-border-subtle: #1c1c1f;
-    --color-text: #fafafa;
-    --color-text-muted: #71717a;
-    --color-text-subtle: #3f3f46;
-    --color-accent: #818cf8;
-    --color-accent-dim: #312e81;
-    --color-green: #34d399;
-    --color-amber: #fbbf24;
-    --color-red: #f87171;
+    --color-bg:            #11111b; /* crust      */
+    --color-surface:       #1e1e2e; /* base       */
+    --color-surface-2:     #313244; /* surface0   */
+    --color-border:        #45475a; /* surface1   */
+    --color-border-subtle: #313244; /* surface0   */
+    --color-text:          #cdd6f4; /* text       */
+    --color-text-muted:    #a6adc8; /* subtext0   */
+    --color-text-subtle:   #6c7086; /* overlay0   */
+    --color-accent:        #cba6f7; /* mauve      */
+    --color-accent-dim:    #2a1f3d; /* mauve dim  */
+    --color-green:         #a6e3a1; /* green      */
+    --color-amber:         #f9e2af; /* yellow     */
+    --color-red:           #f38ba8; /* red        */
+    /* extras */
+    --color-blue:          #89b4fa; /* blue       */
+    --color-teal:          #94e2d5; /* teal       */
+    --color-peach:         #fab387; /* peach      */
+    --color-pink:          #f5c2e7; /* pink       */
+    --color-lavender:      #b4befe; /* lavender   */
+    --color-sky:           #89dceb; /* sky        */
   }
 
   * {
@@ -42,12 +50,12 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #27272a;
+    background: #45475a;
     border-radius: 2px;
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #3f3f46;
+    background: #585b70;
   }
 }
 

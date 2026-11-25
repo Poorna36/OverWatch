@@ -72,11 +72,11 @@ export function LiveView({ sessionId: _id, active, tier, className }: LiveViewPr
   if (tier === 'text') {
     return (
       <div className={cn(
-        'rounded-xl border border-zinc-800 bg-zinc-950 flex flex-col items-center justify-center gap-2 p-6',
+        'rounded-xl border border-[#45475a] bg-[#11111b] flex flex-col items-center justify-center gap-2 p-6',
         className,
       )}>
-        <div className="text-zinc-600 text-xs font-mono">≡ text tier — no live view</div>
-        <div className="text-zinc-700 text-xs">Tool-call feed is the primary view</div>
+        <div className="text-[#6c7086] text-xs font-mono">≡ text tier — no live view</div>
+        <div className="text-[#45475a] text-xs">Tool-call feed is the primary view</div>
       </div>
     )
   }
@@ -84,10 +84,10 @@ export function LiveView({ sessionId: _id, active, tier, className }: LiveViewPr
   if (!active) {
     return (
       <div className={cn(
-        'rounded-xl border border-zinc-800 bg-zinc-950 flex items-center justify-center',
+        'rounded-xl border border-[#45475a] bg-[#11111b] flex items-center justify-center',
         className,
       )}>
-        <div className="text-zinc-700 text-sm">Session not active</div>
+        <div className="text-[#6c7086] text-sm">Session not active</div>
       </div>
     )
   }
@@ -96,18 +96,18 @@ export function LiveView({ sessionId: _id, active, tier, className }: LiveViewPr
 
   return (
     <div className={cn(
-      'rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden relative group',
+      'rounded-xl border border-[#45475a] bg-[#11111b] overflow-hidden relative group',
       className,
     )}>
       {/* Fake title bar */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-zinc-800 bg-zinc-900">
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-[#313244] bg-[#181825]">
         <div className="flex gap-1.5">
-          <div className="w-3 h-3 rounded-full bg-rose-500/60" />
-          <div className="w-3 h-3 rounded-full bg-amber-500/60" />
-          <div className="w-3 h-3 rounded-full bg-emerald-500/60" />
+          <div className="w-3 h-3 rounded-full bg-[#f38ba8]/70" />
+          <div className="w-3 h-3 rounded-full bg-[#f9e2af]/70" />
+          <div className="w-3 h-3 rounded-full bg-[#a6e3a1]/70" />
         </div>
-        <span className="text-xs text-zinc-500 font-mono flex-1 text-center">{frame.label}</span>
-        <div className="flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
+        <span className="text-xs text-[#6c7086] font-mono flex-1 text-center">{frame.label}</span>
+        <div className="flex items-center gap-1 text-[10px] text-[#a6e3a1] font-mono">
           <span className="animate-pulse-dot">●</span>
           <span>LIVE</span>
         </div>
@@ -116,13 +116,13 @@ export function LiveView({ sessionId: _id, active, tier, className }: LiveViewPr
       {/* Terminal content */}
       <div className="p-4 font-mono text-xs leading-relaxed">
         <pre className={cn(
-          'text-emerald-400 whitespace-pre-wrap break-all transition-opacity duration-500',
+          'text-[#a6e3a1] whitespace-pre-wrap break-all transition-opacity duration-500',
           'opacity-90',
         )}>
           {frame.content}
         </pre>
         {/* Fake cursor blink */}
-        <span className="inline-block w-2 h-3.5 bg-emerald-400 animate-pulse ml-0.5 align-middle" />
+        <span className="inline-block w-2 h-3.5 bg-[#cba6f7] animate-pulse ml-0.5 align-middle" />
       </div>
 
       {/* Scan line overlay — gives CRT / broadcast feel */}
@@ -132,7 +132,7 @@ export function LiveView({ sessionId: _id, active, tier, className }: LiveViewPr
       />
 
       {/* Corner tier badge */}
-      <div className="absolute bottom-2 right-2 text-[10px] font-mono text-zinc-700 bg-zinc-950/80 px-1.5 py-0.5 rounded">
+      <div className="absolute bottom-2 right-2 text-[10px] font-mono text-[#6c7086] bg-[#11111b]/80 px-1.5 py-0.5 rounded">
         {tier}
       </div>
     </div>

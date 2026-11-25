@@ -11,16 +11,16 @@ const NAV = [
 
 export function Sidebar() {
   return (
-    <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-800/60 bg-zinc-950/80 glass">
+    <aside className="w-56 shrink-0 flex flex-col border-r border-[#313244]/60 bg-[#11111b]/90 glass">
       {/* Logo */}
-      <div className="px-5 py-5 border-b border-zinc-800/60">
+      <div className="px-5 py-5 border-b border-[#313244]/60">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-lg bg-indigo-600 flex items-center justify-center shrink-0">
-            <EyeIcon className="w-4 h-4 text-white" />
+          <div className="w-7 h-7 rounded-lg bg-[#cba6f7] flex items-center justify-center shrink-0">
+            <EyeIcon className="w-4 h-4 text-[#11111b]" />
           </div>
           <div>
-            <p className="text-sm font-bold text-zinc-100 leading-none">Overwatch</p>
-            <p className="text-[10px] text-zinc-600 mt-0.5">MCP Control Plane</p>
+            <p className="text-sm font-bold text-[#cdd6f4] leading-none">Overwatch</p>
+            <p className="text-[10px] text-[#6c7086] mt-0.5">MCP Control Plane</p>
           </div>
         </div>
       </div>
@@ -35,8 +35,8 @@ export function Sidebar() {
             className={({ isActive }) => cn(
               'flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-all',
               isActive
-                ? 'bg-indigo-600/15 text-indigo-400 font-medium'
-                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60',
+                ? 'bg-[#cba6f7]/15 text-[#cba6f7] font-medium'
+                : 'text-[#6c7086] hover:text-[#cdd6f4] hover:bg-[#313244]/60',
             )}
           >
             <Icon className="w-4 h-4 shrink-0" />
@@ -46,12 +46,12 @@ export function Sidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-4 border-t border-zinc-800/60">
+      <div className="px-4 py-4 border-t border-[#313244]/60">
         <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 shrink-0" />
+          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-[#cba6f7] to-[#b4befe] shrink-0" />
           <div className="min-w-0">
-            <p className="text-xs font-medium text-zinc-300 truncate">demo@overwatch</p>
-            <p className="text-[10px] text-zinc-600">hackathon build</p>
+            <p className="text-xs font-medium text-[#cdd6f4] truncate">demo@overwatch</p>
+            <p className="text-[10px] text-[#6c7086]">hackathon build</p>
           </div>
         </div>
       </div>

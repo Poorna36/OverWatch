@@ -11,14 +11,14 @@ interface StatusDotProps {
 
 export function StatusDot({ state, className }: StatusDotProps) {
   const color = {
-    ACTIVE: 'bg-emerald-400',
-    PAUSED: 'bg-amber-400',
-    ENDED: 'bg-zinc-500',
-    FAILED: 'bg-rose-400',
-    STARTING: 'bg-indigo-400',
-    PLANNING: 'bg-violet-400',
-    CREATED: 'bg-zinc-400',
-    ENDING: 'bg-zinc-400',
+    ACTIVE:   'bg-[#a6e3a1]', // catppuccin green
+    PAUSED:   'bg-[#f9e2af]', // catppuccin yellow
+    ENDED:    'bg-[#6c7086]', // overlay0
+    FAILED:   'bg-[#f38ba8]', // catppuccin red
+    STARTING: 'bg-[#cba6f7]', // mauve
+    PLANNING: 'bg-[#b4befe]', // lavender
+    CREATED:  'bg-[#a6adc8]', // subtext0
+    ENDING:   'bg-[#a6adc8]', // subtext0
   }[state]
 
   const pulse = state === 'ACTIVE' || state === 'STARTING'
@@ -42,9 +42,9 @@ interface DecisionBadgeProps {
 
 export function DecisionBadge({ decision, className }: DecisionBadgeProps) {
   const styles = {
-    allow: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
-    ask: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
-    block: 'text-rose-400 bg-rose-400/10 border-rose-400/20',
+    allow: 'text-[#a6e3a1] bg-[#a6e3a1]/10 border-[#a6e3a1]/20',
+    ask:   'text-[#f9e2af] bg-[#f9e2af]/10 border-[#f9e2af]/20',
+    block: 'text-[#f38ba8] bg-[#f38ba8]/10 border-[#f38ba8]/20',
   }[decision]
 
   const icon = { allow: '✓', ask: '⚠', block: '✕' }[decision]
@@ -70,9 +70,9 @@ interface RiskBadgeProps {
 
 export function RiskBadge({ tier, className }: RiskBadgeProps) {
   const styles = {
-    safe: 'text-zinc-400 bg-zinc-400/10 border-zinc-400/20',
-    sensitive: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
-    critical: 'text-rose-400 bg-rose-400/10 border-rose-400/20',
+    safe:      'text-[#a6adc8] bg-[#a6adc8]/10 border-[#a6adc8]/20',
+    sensitive: 'text-[#f9e2af] bg-[#f9e2af]/10 border-[#f9e2af]/20',
+    critical:  'text-[#f38ba8] bg-[#f38ba8]/10 border-[#f38ba8]/20',
   }[tier]
 
   return (
@@ -91,9 +91,9 @@ interface TierBadgeProps {
 
 export function TierBadge({ tier, className }: TierBadgeProps) {
   const styles = {
-    video: 'text-indigo-400 bg-indigo-400/10 border-indigo-400/20',
-    screenshots: 'text-violet-400 bg-violet-400/10 border-violet-400/20',
-    text: 'text-zinc-400 bg-zinc-400/10 border-zinc-400/20',
+    video:       'text-[#cba6f7] bg-[#cba6f7]/10 border-[#cba6f7]/20',
+    screenshots: 'text-[#b4befe] bg-[#b4befe]/10 border-[#b4befe]/20',
+    text:        'text-[#a6adc8] bg-[#a6adc8]/10 border-[#a6adc8]/20',
   }[tier]
 
   const icons = { video: '▶', screenshots: '◉', text: '≡' }
@@ -118,19 +118,19 @@ interface BudgetBarProps {
 
 export function BudgetBar({ used, total, costUsd, maxCostUsd: _maxCostUsd, className }: BudgetBarProps) {
   const pct = Math.min((used / total) * 100, 100)
-  const color = pct > 80 ? 'bg-rose-500' : pct > 60 ? 'bg-amber-500' : 'bg-indigo-500'
+  const color = pct > 80 ? 'bg-[#f38ba8]' : pct > 60 ? 'bg-[#f9e2af]' : 'bg-[#cba6f7]'
 
   return (
     <div className={cn('space-y-1', className)}>
       <div className="flex items-center justify-between">
-        <span className="text-xs text-zinc-500 font-mono">Budget</span>
-        <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
+        <span className="text-xs text-[#6c7086] font-mono">Budget</span>
+        <div className="flex items-center gap-2 text-xs text-[#a6adc8] font-mono">
           <span>{used}/{total} calls</span>
-          <span className="text-zinc-600">·</span>
+          <span className="text-[#45475a]">·</span>
           <span>${costUsd.toFixed(3)}</span>
         </div>
       </div>
-      <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
+      <div className="h-1 bg-[#313244] rounded-full overflow-hidden">
         <div
           className={cn('h-full rounded-full transition-all duration-500', color)}
           style={{ width: `${pct}%` }}
@@ -168,12 +168,12 @@ interface EmptyStateProps {
 export function EmptyState({ icon, title, description, action }: EmptyStateProps) {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center gap-3">
-      <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600">
+      <div className="w-12 h-12 rounded-2xl bg-[#1e1e2e] border border-[#45475a] flex items-center justify-center text-[#6c7086]">
         {icon}
       </div>
       <div>
-        <p className="text-sm font-medium text-zinc-300">{title}</p>
-        <p className="text-xs text-zinc-600 mt-1 max-w-xs">{description}</p>
+        <p className="text-sm font-medium text-[#cdd6f4]">{title}</p>
+        <p className="text-xs text-[#6c7086] mt-1 max-w-xs">{description}</p>
       </div>
       {action}
     </div>
@@ -194,9 +194,9 @@ export function Card({ children, className, onClick, glow }: CardProps) {
     <div
       onClick={onClick}
       className={cn(
-        'rounded-xl bg-zinc-900 border border-zinc-800 p-4',
+        'rounded-xl bg-[#1e1e2e] border border-[#45475a] p-4',
         glow && 'glow-accent',
-        onClick && 'cursor-pointer hover:border-zinc-700 hover:bg-zinc-800/80 transition-all',
+        onClick && 'cursor-pointer hover:border-[#585b70] hover:bg-[#313244]/80 transition-all',
         className,
       )}
     >
@@ -216,14 +216,14 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 export function Button({
   variant = 'default', size = 'md', loading, children, className, disabled, ...rest
 }: ButtonProps) {
-  const base = 'inline-flex items-center justify-center gap-2 font-medium rounded-lg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 disabled:opacity-40 disabled:cursor-not-allowed'
+  const base = 'inline-flex items-center justify-center gap-2 font-medium rounded-lg transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#cba6f7]/40 disabled:opacity-40 disabled:cursor-not-allowed'
 
   const variants = {
-    default: 'bg-indigo-600 hover:bg-indigo-500 text-white',
-    outline: 'border border-zinc-700 hover:border-zinc-600 hover:bg-zinc-800 text-zinc-300',
-    ghost: 'hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200',
-    danger: 'bg-rose-600/20 hover:bg-rose-600/30 border border-rose-500/30 text-rose-400 hover:text-rose-300',
-    success: 'bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-400 hover:text-emerald-300',
+    default: 'bg-[#cba6f7] hover:bg-[#b48ef5] text-[#11111b]',
+    outline: 'border border-[#45475a] hover:border-[#585b70] hover:bg-[#313244] text-[#a6adc8]',
+    ghost:   'hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4]',
+    danger:  'bg-[#f38ba8]/15 hover:bg-[#f38ba8]/25 border border-[#f38ba8]/30 text-[#f38ba8]',
+    success: 'bg-[#a6e3a1]/15 hover:bg-[#a6e3a1]/25 border border-[#a6e3a1]/30 text-[#a6e3a1]',
   }
 
   const sizes = {
