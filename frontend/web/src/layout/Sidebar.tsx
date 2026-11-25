@@ -4,6 +4,7 @@ import { cn } from '../lib/utils'
 const NAV = [
   { to: '/', label: 'Home', icon: HomeIcon },
   { to: '/new', label: 'New Task', icon: PlusIcon },
+  { to: '/plan', label: 'Plan Preview', icon: PlanIcon },
   { to: '/audit', label: 'Audit', icon: AuditIcon },
   { to: '/settings', label: 'Settings', icon: SettingsIcon },
 ]
@@ -75,6 +76,17 @@ function PlusIcon({ className }: { className?: string }) {
       <circle cx="12" cy="12" r="9"/>
       <line x1="12" y1="8" x2="12" y2="16"/>
       <line x1="8" y1="12" x2="16" y2="12"/>
+    </svg>
+  )
+}
+
+function PlanIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+      <line x1="9" y1="9" x2="15" y2="9"/>
+      <line x1="9" y1="12" x2="15" y2="12"/>
+      <line x1="9" y1="15" x2="12" y2="15"/>
     </svg>
   )
 }

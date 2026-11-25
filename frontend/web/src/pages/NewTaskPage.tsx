@@ -16,14 +16,19 @@ export function NewTaskPage() {
   const [task, setTask] = useState('')
   const [profile, setProfile] = useState('coding')
   const [dryRun, setDryRun] = useState(false)
+  const [planPreview, setPlanPreview] = useState(true)
   const [starting, setStarting] = useState(false)
 
   async function handleStart() {
     if (!task.trim()) return
     setStarting(true)
-    // Simulate a brief delay then navigate to the demo session
     await new Promise(r => setTimeout(r, 1200))
-    navigate('/session/sess_abc123')
+    if (planPreview) {
+      navigate('/plan')
+    } else {
+      navigate('/session/sess_abc123')
+    }
+    setStarting(false)
   }
 
   return (
@@ -106,24 +111,44 @@ export function NewTaskPage() {
         </div>
 
         {/* Options */}
-        <Card className="flex items-center justify-between py-3">
-          <div>
-            <p className="text-sm font-medium text-zinc-300">Dry-run mode</p>
-            <p className="text-xs text-zinc-600 mt-0.5">Reads run normally; writes are recorded but not applied</p>
-          </div>
-          <button
-            onClick={() => setDryRun(d => !d)}
-            className={cn(
-              'relative w-10 h-6 rounded-full transition-colors border',
-              dryRun ? 'bg-indigo-600 border-indigo-500' : 'bg-zinc-800 border-zinc-700',
-            )}
-          >
-            <span className={cn(
-              'absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all',
-              dryRun ? 'left-[18px]' : 'left-0.5',
-            )} />
-          </button>
-        </Card>
+        <div className="space-y-2">
+          <Card className="flex items-center justify-between py-3">
+            <div>
+              <p className="text-sm font-medium text-zinc-300">Plan preview</p>
+              <p className="text-xs text-zinc-600 mt-0.5">Review steps and budget before the agent runs</p>
+            </div>
+            <button
+              onClick={() => setPlanPreview(d => !d)}
+              className={cn(
+                'relative w-10 h-6 rounded-full transition-colors border',
+                planPreview ? 'bg-indigo-600 border-indigo-500' : 'bg-zinc-800 border-zinc-700',
+              )}
+            >
+              <span className={cn(
+                'absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all',
+                planPreview ? 'left-[18px]' : 'left-0.5',
+              )} />
+            </button>
+          </Card>
+          <Card className="flex items-center justify-between py-3">
+            <div>
+              <p className="text-sm font-medium text-zinc-300">Dry-run mode</p>
+              <p className="text-xs text-zinc-600 mt-0.5">Reads run normally; writes are recorded but not applied</p>
+            </div>
+            <button
+              onClick={() => setDryRun(d => !d)}
+              className={cn(
+                'relative w-10 h-6 rounded-full transition-colors border',
+                dryRun ? 'bg-indigo-600 border-indigo-500' : 'bg-zinc-800 border-zinc-700',
+              )}
+            >
+              <span className={cn(
+                'absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all',
+                dryRun ? 'left-[18px]' : 'left-0.5',
+              )} />
+            </button>
+          </Card>
+        </div>
 
         {/* Start button */}
         <Button
