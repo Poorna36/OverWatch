@@ -1,7 +1,8 @@
 import React from 'react'
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, SafeAreaView, StatusBar,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import { MOCK_SESSIONS, type EnvConfig, type ChatThread } from '../lib/mock-data'
 import { T, StateChip, PulseDot } from '../components/ui'
 
@@ -21,7 +22,7 @@ export function HomeScreen({ navigation, env, chats, onOpenChat }: HomeScreenPro
   const pendingCount = MOCK_SESSIONS.reduce((acc, s) => acc + s.pendingApprovals.length, 0)
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
         {/* Header */}

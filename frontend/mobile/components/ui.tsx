@@ -178,8 +178,46 @@ export function PrimaryBtn({ label, onPress, loading, disabled }: {
       disabled={disabled || loading}
       style={[u.primaryBtn, (disabled || loading) && { opacity: 0.4 }]}
     >
-      <Text style={u.primaryBtnText}>{loading ? '…' : label}</Text>
+      <Text style={u.primaryBtnText}>{loading ? '...' : label}</Text>
     </TouchableOpacity>
+  )
+}
+
+// ─── Stylized Profile Avatar (clean geometric portrait, zero broken URLs) ──────
+export function ProfileAvatar({ size = 44, online = true }: { size?: number; online?: boolean }) {
+  const head = size * 0.34
+  const bodyW = size * 0.62
+  const bodyH = size * 0.34
+  return (
+    <View style={{
+      width: size, height: size, borderRadius: size / 2,
+      backgroundColor: T.indigoDim, borderWidth: 1.5, borderColor: T.indigo + '88',
+      alignItems: 'center', justifyContent: 'flex-end', overflow: 'hidden', position: 'relative',
+    }}>
+      {/* Soft top highlight */}
+      <View style={{
+        position: 'absolute', top: -size * 0.15, width: size * 0.9, height: size * 0.5,
+        borderRadius: size, backgroundColor: T.indigo + '18',
+      }} />
+      {/* Head */}
+      <View style={{
+        width: head, height: head, borderRadius: head / 2,
+        backgroundColor: T.text, marginBottom: size * 0.06, opacity: 0.92,
+      }} />
+      {/* Shoulders */}
+      <View style={{
+        width: bodyW, height: bodyH, borderTopLeftRadius: bodyW / 2, borderTopRightRadius: bodyW / 2,
+        backgroundColor: T.indigo, opacity: 0.9,
+      }} />
+      {online && (
+        <View style={{
+          position: 'absolute', right: 0, bottom: 0,
+          width: Math.max(10, size * 0.24), height: Math.max(10, size * 0.24),
+          borderRadius: 99, backgroundColor: T.green,
+          borderWidth: 2, borderColor: T.surface,
+        }} />
+      )}
+    </View>
   )
 }
 

@@ -1,12 +1,13 @@
 import React, { useState } from 'react'
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  SafeAreaView, StatusBar, Switch,
+  StatusBar, Switch,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import {
   type EnvConfig, VM_IMAGES, VM_DEPS_OPTIONS, VM_INCLUDES_OPTIONS, VM_MCP_OPTIONS,
 } from '../lib/mock-data'
-import { T, PulseDot } from '../components/ui'
+import { T, PulseDot, ProfileAvatar } from '../components/ui'
 
 interface SettingsScreenProps {
   env: EnvConfig
@@ -38,21 +39,26 @@ export function SettingsScreen({ env, onChangeEnv, userEmail, onLogout }: Settin
   }
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
         <View style={s.header}>
-          <Text style={s.heading}>Settings</Text>
-          <Text style={s.sub}>Workspace, VM config & connectors</Text>
+          <Text style={s.heading}>Profile & Settings</Text>
+          <Text style={s.sub}>Account, workspace & VM config</Text>
         </View>
 
-        {/* Account */}
-        <Text style={s.sectionLabel}>ACCOUNT (DEMO)</Text>
+        {/* Profile Card with Avatar */}
         <View style={s.card}>
           <View style={s.rowBetween}>
-            <View>
-              <Text style={s.rowTitle}>{userEmail}</Text>
-              <Text style={s.rowSub}>Signed in · Demo session</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 }}>
+              <ProfileAvatar size={52} online />
+              <View style={{ flex: 1 }}>
+                <Text style={[s.rowTitle, { fontSize: 16 }]}>Poorn</Text>
+                <Text style={s.rowSub} numberOfLines={1}>{userEmail}</Text>
+                <Text style={{ color: T.indigo, fontSize: 11, fontWeight: '600', marginTop: 3 }}>
+                  {env.mode === 'desktop' ? 'Remote Desktop Connected' : 'VM Sandbox Active'}
+                </Text>
+              </View>
             </View>
             <TouchableOpacity style={s.logoutBtn} onPress={onLogout} activeOpacity={0.8}>
               <Text style={s.logoutText}>Sign out</Text>

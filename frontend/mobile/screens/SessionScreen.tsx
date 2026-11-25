@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  SafeAreaView, StatusBar, Animated, Modal, Dimensions,
+  StatusBar, Animated, Modal, Dimensions,
   FlatList,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import {
   MOCK_SESSIONS, DEMO_EVENTS,
   type Session, type ToolCallEvent, type ApprovalRequest,
@@ -95,10 +96,10 @@ export function SessionScreen({ navigation, route }: SessionScreenProps) {
         budget: { ...s.budget, used: Math.min(s.budget.used + 7, s.budget.total) },
         pendingApprovals: event.decision === 'ask'
           ? [...s.pendingApprovals, {
-              id: `a${seq}`, tool: event.tool, args: event.args,
-              riskTier: event.riskTier, reversible: event.reversible,
-              createdAt: new Date(), expiresAt: new Date(Date.now() + 120_000),
-            } as ApprovalRequest]
+            id: `a${seq}`, tool: event.tool, args: event.args,
+            riskTier: event.riskTier, reversible: event.reversible,
+            createdAt: new Date(), expiresAt: new Date(Date.now() + 120_000),
+          } as ApprovalRequest]
           : s.pendingApprovals,
       }))
       seq++
@@ -122,7 +123,7 @@ export function SessionScreen({ navigation, route }: SessionScreenProps) {
   const mcpTranslate = mcpAnim.interpolate({ inputRange: [0, 1], outputRange: [SW, 0] })
 
   return (
-    <SafeAreaView style={ss.safe}>
+    <SafeAreaView style={ss.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
 
       {/* ── Top bar ── */}
@@ -478,11 +479,11 @@ function ToolCallCard({ event: ev, isLatest }: { event: ToolCallEvent; isLatest:
 function MCPPanel({ session, onClose }: { session: Session; onClose: () => void }) {
   const servers = [
     { id: 'terminal', label: 'terminal', icon: '▪', active: session.profile === 'coding' || session.profile === 'general' },
-    { id: 'files',    label: 'files',    icon: '◫', active: true },
-    { id: 'browser',  label: 'browser',  icon: '◎', active: session.profile === 'general' },
-    { id: 'desktop',  label: 'desktop',  icon: '□', active: true },
+    { id: 'files', label: 'files', icon: '◫', active: true },
+    { id: 'browser', label: 'browser', icon: '◎', active: session.profile === 'general' },
+    { id: 'desktop', label: 'desktop', icon: '□', active: true },
     { id: 'calendar', label: 'calendar', icon: '▦', active: session.profile === 'daily_routine' },
-    { id: 'gmail',    label: 'gmail',    icon: 'M', active: session.profile === 'daily_routine' },
+    { id: 'gmail', label: 'gmail', icon: 'M', active: session.profile === 'daily_routine' },
   ]
 
   const pipelineSteps: Array<{ step: string; label: string; status: 'pass' | 'skip' | 'wait' | 'fail'; isLast?: boolean }> = [
@@ -498,7 +499,7 @@ function MCPPanel({ session, onClose }: { session: Session; onClose: () => void 
 
   const stats = {
     allow: session.toolCalls.filter(t => t.decision === 'allow').length,
-    ask:   session.toolCalls.filter(t => t.decision === 'ask').length,
+    ask: session.toolCalls.filter(t => t.decision === 'ask').length,
     block: session.toolCalls.filter(t => t.decision === 'block').length,
   }
 
@@ -528,7 +529,7 @@ function MCPPanel({ session, onClose }: { session: Session; onClose: () => void 
           <Text style={mp.sectionLabel}>Decisions</Text>
           <View style={mp.decisionRow}>
             <DecisionStat label="Allowed" value={stats.allow} color={T.green} />
-            <DecisionStat label="Ask"     value={stats.ask}   color={T.amber} />
+            <DecisionStat label="Ask" value={stats.ask} color={T.amber} />
             <DecisionStat label="Blocked" value={stats.block} color={T.red} />
           </View>
         </View>
@@ -598,10 +599,10 @@ function PipelineStep({ step, label, status, isLast }: {
   step: string; label: string; status: 'pass' | 'skip' | 'wait' | 'fail'; isLast: boolean
 }) {
   const cfg = {
-    pass: { color: T.green,   icon: '✓', dim: false },
+    pass: { color: T.green, icon: '✓', dim: false },
     skip: { color: T.textDim, icon: '—', dim: true },
-    wait: { color: T.amber,   icon: '⟳', dim: false },
-    fail: { color: T.red,     icon: '✕', dim: false },
+    wait: { color: T.amber, icon: '⟳', dim: false },
+    fail: { color: T.red, icon: '✕', dim: false },
   }[status]
 
   return (

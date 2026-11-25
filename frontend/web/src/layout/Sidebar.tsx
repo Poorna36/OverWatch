@@ -3,6 +3,7 @@ import { cn } from '../lib/utils'
 
 const NAV = [
   { to: '/', label: 'Home', icon: HomeIcon },
+  { to: '/live-scene', label: 'Live Agent Scene', icon: PlanIcon },
   { to: '/new', label: 'New Task', icon: PlusIcon },
   { to: '/plan', label: 'Plan Preview', icon: PlanIcon },
   { to: '/audit', label: 'Audit', icon: AuditIcon },

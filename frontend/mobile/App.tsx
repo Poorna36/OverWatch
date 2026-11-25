@@ -152,11 +152,11 @@ function MainTabs({
         )}
       </Tab.Screen>
 
-      {/* 4. Settings */}
+      {/* 4. Profile & Settings */}
       <Tab.Screen
         name="SettingsTab"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon code="settings" label="Settings" focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon code="settings" label="Profile" focused={focused} />,
         }}
       >
         {() => (

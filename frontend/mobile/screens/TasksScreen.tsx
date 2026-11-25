@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
 import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, SafeAreaView, StatusBar,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import { MOCK_SESSIONS, type Session, type ToolCallEvent } from '../lib/mock-data'
 import { T, StateChip, DecisionPill, RiskTag, PulseDot } from '../components/ui'
 
@@ -25,12 +26,12 @@ export function TasksScreen({ navigation }: { navigation: any }) {
         s.id !== sessionId
           ? s
           : {
-              ...s,
-              pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
-              toolCalls: s.toolCalls.map(tc =>
-                tc.decision === 'ask' ? { ...tc, decision: 'allow', reason: 'Approved by user' } : tc
-              ),
-            }
+            ...s,
+            pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
+            toolCalls: s.toolCalls.map(tc =>
+              tc.decision === 'ask' ? { ...tc, decision: 'allow', reason: 'Approved by user' } : tc
+            ),
+          }
       )
     )
   }
@@ -41,18 +42,18 @@ export function TasksScreen({ navigation }: { navigation: any }) {
         s.id !== sessionId
           ? s
           : {
-              ...s,
-              pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
-              toolCalls: s.toolCalls.map(tc =>
-                tc.decision === 'ask' ? { ...tc, decision: 'block', reason: 'Denied by user' } : tc
-              ),
-            }
+            ...s,
+            pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
+            toolCalls: s.toolCalls.map(tc =>
+              tc.decision === 'ask' ? { ...tc, decision: 'block', reason: 'Denied by user' } : tc
+            ),
+          }
       )
     )
   }
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
       <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
         {/* Header */}

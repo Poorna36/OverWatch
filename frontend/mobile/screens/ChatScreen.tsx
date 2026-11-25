@@ -1,15 +1,16 @@
 import React, { useState, useRef } from 'react'
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity, TextInput,
-  SafeAreaView, StatusBar, KeyboardAvoidingView, Platform, Modal,
+  StatusBar, KeyboardAvoidingView, Platform, Modal,
   Animated, Dimensions, ScrollView,
 } from 'react-native'
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   ROLES, SUGGESTED_PROMPTS,
   type AgentRole, type ChatMessage, type ChatThread, type EnvConfig, type ToolCallEvent,
 } from '../lib/mock-data'
 import { buildSimulation } from '../lib/agent-sim'
-import { T, DecisionPill, PulseDot } from '../components/ui'
+import { T, DecisionPill, PulseDot, ProfileAvatar } from '../components/ui'
 
 const { width: SW } = Dimensions.get('window')
 
@@ -32,9 +33,11 @@ export function ChatScreen({
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
   const [running, setRunning] = useState(false)
+  const [execStatus, setExecStatus] = useState('... Executing task')
   const [livePreview, setLivePreview] = useState<{ title: string; lines: string[] } | null>(null)
   const [liveSteps, setLiveSteps] = useState<ToolCallEvent[]>([])
 
+  const insets = useSafeAreaInsets()
   const listRef = useRef<FlatList>(null)
   const sidebarAnim = useRef(new Animated.Value(0)).current
 
@@ -75,6 +78,8 @@ export function ChatScreen({
     setInput('')
     setRunning(true)
     setLiveSteps([])
+    setLivePreview(null)
+    setExecStatus(`... Executing task on ${env.mode === 'desktop' ? 'Remote Desktop' : 'VM'}`)
 
     const sim = buildSimulation(prompt, currentRole, env)
     const userMsg: ChatMessage = {
@@ -113,6 +118,8 @@ export function ChatScreen({
 
     for (let i = 0; i < sim.steps.length; i++) {
       const step = sim.steps[i]
+      setExecStatus(step.statusLabel || '... Executing task')
+      setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 80)
       await new Promise(r => setTimeout(r, step.delayMs))
 
       if (step.previewTitle && step.previewLines) {
@@ -130,6 +137,7 @@ export function ChatScreen({
         collectedCalls.push(tc)
         setLiveSteps([...collectedCalls])
       }
+      setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 80)
     }
 
     const agentMsg: ChatMessage = {
@@ -143,11 +151,11 @@ export function ChatScreen({
       previewLines: lastPreview?.lines,
       approval: sim.approval
         ? {
-            ...sim.approval,
-            id: `apr_${Date.now()}`,
-            createdAt: new Date(),
-            expiresAt: new Date(Date.now() + 120_000),
-          }
+          ...sim.approval,
+          id: `apr_${Date.now()}`,
+          createdAt: new Date(),
+          expiresAt: new Date(Date.now() + 120_000),
+        }
         : undefined,
       approvalStatus: sim.approval ? 'pending' : undefined,
     }
@@ -172,20 +180,20 @@ export function ChatScreen({
         c.id !== activeChat.id
           ? c
           : {
-              ...c,
-              messages: c.messages.map(m =>
-                m.id === msgId
-                  ? {
-                      ...m,
-                      approvalStatus: decision,
-                      text:
-                        decision === 'approved'
-                          ? m.text + '\n\n✓ **Approved & submitted** via MCP gateway.'
-                          : m.text + '\n\n✕ **Denied** — submission cancelled.',
-                    }
-                  : m
-              ),
-            }
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === msgId
+                ? {
+                  ...m,
+                  approvalStatus: decision,
+                  text:
+                    decision === 'approved'
+                      ? m.text + '\n\n✓ **Approved & submitted** via MCP gateway.'
+                      : m.text + '\n\n✕ **Denied** — submission cancelled.',
+                }
+                : m
+            ),
+          }
       )
     )
   }
@@ -196,7 +204,7 @@ export function ChatScreen({
   })
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
 
       {/* ── Top Header ── */}
@@ -305,10 +313,11 @@ export function ChatScreen({
                 <View style={s.streamingBox}>
                   <View style={s.streamingHead}>
                     <PulseDot color={T.indigo} size={7} />
-                    <Text style={s.streamingTitle}>
-                      Running on {env.mode === 'desktop' ? 'Remote Desktop' : 'VM'}…
-                    </Text>
+                    <Text style={s.streamingTitle}>{execStatus}</Text>
                   </View>
+                  <Text style={s.execBanner}>
+                    Working in background on {env.mode === 'desktop' ? 'Remote Desktop' : 'VM'} (3-5s sync)...
+                  </Text>
                   {liveSteps.map(tc => (
                     <View key={tc.id} style={s.stepRow}>
                       <Text style={s.stepTool}>{tc.tool}</Text>
@@ -392,7 +401,7 @@ export function ChatScreen({
       {/* ── MCP Gateway Side Drawer ── */}
       <Modal visible={mcpOpen} transparent animationType="fade" onRequestClose={() => setMcpOpen(false)}>
         <TouchableOpacity style={s.mcpOverlay} activeOpacity={1} onPress={() => setMcpOpen(false)}>
-          <View style={s.mcpDrawer} onStartShouldSetResponder={() => true}>
+          <View style={[s.mcpDrawer, { paddingTop: Math.max(insets.top + 14, 28) }]} onStartShouldSetResponder={() => true}>
             <View style={s.mcpHeader}>
               <Text style={s.mcpTitle}>MCP Gateway</Text>
               <TouchableOpacity onPress={() => setMcpOpen(false)}>
@@ -425,7 +434,7 @@ export function ChatScreen({
       {sidebarOpen && (
         <View style={s.sidebarBackdrop}>
           <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={closeSidebar} />
-          <Animated.View style={[s.sidebar, { transform: [{ translateX: sidebarTranslate }] }]}>
+          <Animated.View style={[s.sidebar, { paddingTop: Math.max(insets.top + 14, 24), transform: [{ translateX: sidebarTranslate }] }]}>
             <View style={s.sidebarTop}>
               <Text style={s.sidebarBrand}>Overwatch</Text>
               <TouchableOpacity onPress={closeSidebar}>
@@ -464,13 +473,18 @@ export function ChatScreen({
             </ScrollView>
 
             <View style={s.sidebarFooter}>
-              <View style={s.sidebarEnvRow}>
-                <PulseDot color={env.mode === 'desktop' ? T.green : T.indigo} size={6} />
-                <Text style={s.sidebarEnvText} numberOfLines={1}>
-                  {env.mode === 'desktop' ? 'Remote Desktop' : `VM · ${env.vmImage}`}
-                </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                <ProfileAvatar size={36} online />
+                <View style={{ flex: 1 }}>
+                  <View style={s.sidebarEnvRow}>
+                    <PulseDot color={env.mode === 'desktop' ? T.green : T.indigo} size={6} />
+                    <Text style={s.sidebarEnvText} numberOfLines={1}>
+                      {env.mode === 'desktop' ? 'Remote Desktop' : `VM · ${env.vmImage}`}
+                    </Text>
+                  </View>
+                  <Text style={s.sidebarUser} numberOfLines={1}>{userEmail}</Text>
+                </View>
               </View>
-              <Text style={s.sidebarUser} numberOfLines={1}>{userEmail}</Text>
             </View>
           </Animated.View>
         </View>
@@ -641,7 +655,8 @@ const s = StyleSheet.create({
     borderWidth: 1, borderColor: T.border, padding: 12, gap: 8, marginTop: 6,
   },
   streamingHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  streamingTitle: { color: T.textSub, fontSize: 12, fontWeight: '600' },
+  streamingTitle: { color: T.text, fontSize: 13, fontWeight: '600', flex: 1 },
+  execBanner: { color: T.indigo, fontSize: 11, fontFamily: T.mono },
   stepRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   stepTool: { color: T.text, fontSize: 12, fontFamily: T.mono },
 

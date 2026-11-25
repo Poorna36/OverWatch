@@ -6,6 +6,7 @@ import { PlanPreviewPage } from './pages/PlanPreviewPage'
 import { SessionPage } from './pages/SessionPage'
 import { AuditPage } from './pages/AuditPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { LiveScenePage } from './pages/LiveScenePage'
 import { MobileBridgePopup } from './components/MobileBridgePopup'
 import './index.css'
 
@@ -17,6 +18,7 @@ export default function App() {
         <main className="flex-1 flex flex-col overflow-hidden">
           <Routes>
             <Route path="/" element={<HomePage />} />
+            <Route path="/live-scene" element={<LiveScenePage />} />
             <Route path="/new" element={<NewTaskPage />} />
             <Route path="/plan" element={<PlanPreviewPage />} />
             <Route path="/session/:id" element={<SessionPage />} />

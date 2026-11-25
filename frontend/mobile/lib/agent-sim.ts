@@ -2,6 +2,7 @@ import type { AgentRole, ApprovalRequest, EnvConfig, ToolCallEvent } from './moc
 
 export interface SimulatedStep {
   delayMs: number
+  statusLabel: string
   toolCall?: Omit<ToolCallEvent, 'id' | 'seq' | 'timestamp'>
   previewTitle?: string
   previewLines?: string[]
@@ -16,7 +17,7 @@ export interface SimulatedResponse {
 
 /**
  * Generates a realistic, prompt-aware MCP execution plan & response
- * so any prompt (plus the 3 core demo flows) feels live and responsive.
+ * with 3-5 second background pacing per step.
  */
 export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig): SimulatedResponse {
   const lower = prompt.toLowerCase().trim()
@@ -28,7 +29,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Follow-up Confirmed',
       steps: [
         {
-          delayMs: 600,
+          delayMs: 3200,
+          statusLabel: `Executing task on ${targetEnv}...`,
           toolCall: {
             tool: 'agent.execute_followup',
             args: { env: targetEnv, confirmed: true },
@@ -50,7 +52,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
     }
   }
 
-  // 0b. Google Photos / App Store / Search Agent
+  // 0b. Google Photos / App Store / Gmail
   if (lower.includes('photo') || lower.includes('store') || lower.includes('gmail') || lower.includes('email')) {
     const isPhotos = lower.includes('photo')
     const isStore = lower.includes('store')
@@ -58,7 +60,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: isPhotos ? 'Google Photos Organizer' : isStore ? 'App Store Check' : 'Gmail Assistant',
       steps: [
         {
-          delayMs: 650,
+          delayMs: 3400,
+          statusLabel: `Executing task — opening ${isPhotos ? 'Google Photos' : isStore ? 'App Store' : 'Gmail'} on ${targetEnv}...`,
           toolCall: {
             tool: isPhotos ? 'google_photos.list_recent' : isStore ? 'app_store.search' : 'gmail.list_unread',
             args: { env: targetEnv, limit: 10 },
@@ -89,7 +92,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Calendar Deadlines & Reminders',
       steps: [
         {
-          delayMs: 650,
+          delayMs: 3200,
+          statusLabel: `Executing task — opening Calendar on ${targetEnv}...`,
           toolCall: {
             tool: 'calendar.open',
             args: { env: targetEnv, view: 'agenda' },
@@ -101,12 +105,13 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           previewTitle: `${targetEnv} — Calendar`,
           previewLines: [
             'Opening Calendar app...',
-            'Reading events: Nov 26 – Dec 03',
+            'Reading events: Nov 26 - Dec 03',
             'Found 6 scheduled events, 4 reminders',
           ],
         },
         {
-          delayMs: 800,
+          delayMs: 3800,
+          statusLabel: 'Executing task — browsing Reminders & due dates...',
           toolCall: {
             tool: 'reminders.scan',
             args: { lists: ['Work', 'University', 'Personal'], includeOverdue: true },
@@ -124,7 +129,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 600,
+          delayMs: 3000,
+          statusLabel: 'Executing task — checking calendar conflicts...',
           toolCall: {
             tool: 'calendar.check_conflicts',
             args: { windowHours: 72 },
@@ -154,7 +160,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Application Form Assistant',
       steps: [
         {
-          delayMs: 700,
+          delayMs: 3300,
+          statusLabel: `Executing task — opening ${targetUrl} on ${targetEnv}...`,
           toolCall: {
             tool: 'browser.navigate',
             args: { url: targetUrl, env: targetEnv },
@@ -171,12 +178,13 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 850,
+          delayMs: 4000,
+          statusLabel: 'Executing task — filling form fields from profile...',
           toolCall: {
             tool: 'browser.fill_fields',
             args: {
               fullName: 'Poorn',
-              email: 'demo@overwatch.dev',
+              email: 'poorn@overwatch.dev',
               track: 'AI Systems & Security',
               fieldsFilled: 6,
             },
@@ -187,15 +195,16 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           },
           previewTitle: `${targetEnv} — Form Preview`,
           previewLines: [
-            '✓ Full Name: Poorn',
-            '✓ Email: demo@overwatch.dev',
-            '✓ Project: Overwatch MCP Control Plane',
-            '✓ Repo: github.com/poorn/overwatch',
-            '⏸ Paused before clicking [Submit]',
+            '[OK] Full Name: Poorn',
+            '[OK] Email: poorn@overwatch.dev',
+            '[OK] Project: Overwatch MCP Control Plane',
+            '[OK] Repo: github.com/poorn/overwatch',
+            '[PAUSE] Stopped before clicking [Submit]',
           ],
         },
         {
-          delayMs: 700,
+          delayMs: 3000,
+          statusLabel: 'Executing task — requesting submission permission...',
           toolCall: {
             tool: 'browser.submit_form',
             args: { url: targetUrl, action: 'click #submit-btn' },
@@ -225,7 +234,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Python Project Workspace',
       steps: [
         {
-          delayMs: 650,
+          delayMs: 3200,
+          statusLabel: `Executing task — scanning Python workspace on ${targetEnv}...`,
           toolCall: {
             tool: 'files.scan_workspace',
             args: { path: '/workspace/python-project', env: targetEnv },
@@ -243,7 +253,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 850,
+          delayMs: 4200,
+          statusLabel: 'Executing task — running pytest test suite...',
           toolCall: {
             tool: 'terminal.run',
             args: { cmd: 'pytest tests/ -q' },
@@ -257,11 +268,12 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
             '$ pytest tests/ -q',
             '.............. [100%]',
             '14 passed in 0.84s',
-            '✓ Environment healthy (Python 3.12)',
+            '[OK] Environment healthy (Python 3.12)',
           ],
         },
         {
-          delayMs: 700,
+          delayMs: 3200,
+          statusLabel: 'Executing task — resuming code changes in gateway.py...',
           toolCall: {
             tool: 'files.edit',
             args: { path: 'src/agent/gateway.py', change: 'Added retry & timeout guard' },
@@ -282,22 +294,22 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
   }
 
   // 4. Dynamic fallback for ANY custom prompt the user types
-  const snippet = prompt.trim().slice(0, 44) + (prompt.trim().length > 44 ? '…' : '')
+  const snippet = prompt.trim().slice(0, 44) + (prompt.trim().length > 44 ? '...' : '')
   const toolByRole: Record<AgentRole, { tool: string; args: Record<string, unknown>; preview: string[] }> = {
     general: {
       tool: 'desktop.inspect',
       args: { query: snippet, env: targetEnv },
-      preview: [`Target: ${targetEnv}`, `Task: "${snippet}"`, 'Checking active windows & context...', '✓ Action plan ready'],
+      preview: [`Target: ${targetEnv}`, `Task: "${snippet}"`, 'Checking active windows & context...', '[OK] Action plan ready'],
     },
     code: {
       tool: 'terminal.run',
       args: { cmd: `overwatch-exec --task "${snippet}"`, env: targetEnv },
-      preview: [`$ overwatch-exec --task "${snippet}"`, 'Inspecting workspace files...', '✓ Checks completed (exit 0)'],
+      preview: [`$ overwatch-exec --task "${snippet}"`, 'Inspecting workspace files...', '[OK] Checks completed (exit 0)'],
     },
     research: {
       tool: 'browser.search',
       args: { q: snippet, sources: 4 },
-      preview: [`Searching: "${snippet}"`, 'Fetched 4 primary sources', 'Cross-checking citations...', '✓ Summary compiled'],
+      preview: [`Searching: "${snippet}"`, 'Fetched 4 primary sources', 'Cross-checking citations...', '[OK] Summary compiled'],
     },
   }
   const picked = toolByRole[role]
@@ -306,7 +318,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
     title: snippet || 'New Task',
     steps: [
       {
-        delayMs: 650,
+        delayMs: 3400,
+        statusLabel: `Executing task on ${targetEnv}...`,
         toolCall: {
           tool: picked.tool,
           args: picked.args,
@@ -319,7 +332,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
         previewLines: picked.preview,
       },
       {
-        delayMs: 650,
+        delayMs: 3000,
+        statusLabel: 'Executing task — verifying MCP policy & audit log...',
         toolCall: {
           tool: 'policy.verify',
           args: { role, mode: env.mode },

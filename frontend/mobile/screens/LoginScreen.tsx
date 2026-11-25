@@ -1,8 +1,9 @@
 import React, { useState } from 'react'
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, SafeAreaView, StatusBar, KeyboardAvoidingView, Platform,
+  TextInput, StatusBar, KeyboardAvoidingView, Platform,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import {
   type EnvConfig, VM_IMAGES, VM_DEPS_OPTIONS, VM_INCLUDES_OPTIONS, VM_MCP_OPTIONS,
 } from '../lib/mock-data'
@@ -40,7 +41,7 @@ export function LoginScreen({ env, onChangeEnv, onComplete }: LoginScreenProps) 
   }
 
   return (
-    <SafeAreaView style={s.safe}>
+    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
       <StatusBar barStyle="light-content" />
       <KeyboardAvoidingView
         style={{ flex: 1 }}

@@ -1,8 +1,8 @@
 import React, { useState } from 'react'
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity,
-  SafeAreaView, StatusBar,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, StatusBar,
 } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
 import { MOCK_SESSIONS, type Decision } from '../lib/mock-data'
 import { T, DecisionPill, RiskTag } from '../components/ui'
 
