@@ -123,7 +123,7 @@ export function SessionScreen({ navigation, route }: SessionScreenProps) {
 
   return (
     <SafeAreaView style={ss.safe}>
-      <StatusBar barStyle="light-content" backgroundColor={T.bg} />
+      <StatusBar barStyle="light-content" />
 
       {/* ── Top bar ── */}
       <View style={ss.topBar}>
@@ -267,7 +267,7 @@ export function SessionScreen({ navigation, route }: SessionScreenProps) {
                   <Text style={ss.endedLink}>View audit receipt →</Text>
                 </TouchableOpacity>
               </View>
-            ) : null
+            ) : undefined
           }
         />
       </View>
@@ -485,7 +485,7 @@ function MCPPanel({ session, onClose }: { session: Session; onClose: () => void 
     { id: 'gmail',    label: 'gmail',    icon: '◈', active: session.profile === 'daily_routine' },
   ]
 
-  const pipelineSteps = [
+  const pipelineSteps: Array<{ step: string; label: string; status: 'pass' | 'skip' | 'wait' | 'fail'; isLast?: boolean }> = [
     { step: '01', label: 'Session active?', status: 'pass' },
     { step: '02', label: 'Tool in profile?', status: 'pass' },
     { step: '03', label: 'Within plan?', status: 'skip' },
@@ -805,7 +805,7 @@ const ss = StyleSheet.create({
   endedSub: { color: T.textSub, fontSize: 12, textAlign: 'center', lineHeight: 18 },
   endedLink: { color: T.indigo, fontSize: 13 },
 
-  mcpOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10 },
+  mcpOverlay: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10 },
   mcpPanel: {
     position: 'absolute', top: 0, right: 0, bottom: 0,
     width: SW * 0.82, backgroundColor: T.surface,
