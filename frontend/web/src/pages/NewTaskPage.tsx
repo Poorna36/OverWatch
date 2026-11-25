@@ -5,19 +5,36 @@ import { Button, Card } from '../components/ui'
 import { cn } from '../lib/utils'
 
 const EXAMPLE_TASKS = [
-  'Create a Python script that fetches a page title and runs it',
-  'Research recent papers on transformer architectures and summarize',
-  'Set up a TypeScript monorepo with ESLint and Prettier',
-  'Draft a reply to my latest email about the project deadline',
+  'Open my calendar, browse through my reminders and give me deadlines',
+  'Go to this specific website and fill an application form for me',
+  'Resume building my project in Python',
+  'Check Google Photos and organize recent screenshots',
 ]
+
+const VM_INCLUDES = ['Google Photos', 'Gmail', 'Google Calendar', 'App Store', 'Search Agent', 'Browser', 'Terminal', 'Filesystem']
 
 export function NewTaskPage() {
   const navigate = useNavigate()
   const [task, setTask] = useState('')
   const [profile, setProfile] = useState('coding')
+  const [envMode, setEnvMode] = useState<'desktop' | 'vm'>('desktop')
+  const [vmImage, setVmImage] = useState('ubuntu-24.04-dev')
+  const [vmIncludes, setVmIncludes] = useState<string[]>(['Google Calendar', 'Gmail', 'Browser', 'Search Agent', 'Terminal'])
+  const [vmState, setVmState] = useState<'idle' | 'booting' | 'running'>('idle')
   const [dryRun, setDryRun] = useState(false)
   const [planPreview, setPlanPreview] = useState(true)
   const [starting, setStarting] = useState(false)
+
+  function toggleInclude(item: string) {
+    setVmIncludes(prev => prev.includes(item) ? prev.filter(x => x !== item) : [...prev, item])
+  }
+
+  async function handleStartVm() {
+    if (vmState === 'booting') return
+    setVmState('booting')
+    await new Promise(r => setTimeout(r, 1100))
+    setVmState('running')
+  }
 
   async function handleStart() {
     if (!task.trim()) return
@@ -108,6 +125,89 @@ export function NewTaskPage() {
               </button>
             ))}
           </div>
+        </div>
+
+        {/* Environment & VM Builder */}
+        <div className="space-y-2">
+          <label className="text-xs font-medium text-[#787268] uppercase tracking-widest">
+            Execution Environment
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => setEnvMode('desktop')}
+              className={cn(
+                'rounded-xl border p-3 text-left transition-all',
+                envMode === 'desktop'
+                  ? 'border-[#D97757] bg-[#332018]/60'
+                  : 'border-[#33312D] bg-[#1C1B19] hover:border-[#45423C]',
+              )}
+            >
+              <p className="text-sm font-medium text-[#F4F1EA]">Remote Desktop</p>
+              <p className="text-xs text-[#787268] mt-0.5">Direct RDP bridge to your laptop</p>
+            </button>
+            <button
+              onClick={() => setEnvMode('vm')}
+              className={cn(
+                'rounded-xl border p-3 text-left transition-all',
+                envMode === 'vm'
+                  ? 'border-[#D97757] bg-[#332018]/60'
+                  : 'border-[#33312D] bg-[#1C1B19] hover:border-[#45423C]',
+              )}
+            >
+              <p className="text-sm font-medium text-[#F4F1EA]">Isolated VM Sandbox</p>
+              <p className="text-xs text-[#787268] mt-0.5">Custom image, apps & MCP agents</p>
+            </button>
+          </div>
+
+          {envMode === 'vm' && (
+            <Card className="space-y-3 mt-2">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold text-[#F4F1EA]">VM Image & Included Services</p>
+                  <p className="text-[11px] text-[#787268]">Select base image and MCP connectors to mount</p>
+                </div>
+                <Button
+                  size="sm"
+                  variant={vmState === 'running' ? 'success' : 'default'}
+                  loading={vmState === 'booting'}
+                  onClick={handleStartVm}
+                >
+                  {vmState === 'idle' ? 'Start VM' : vmState === 'booting' ? 'Starting VM…' : '● VM Running'}
+                </Button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {['ubuntu-24.04-dev', 'python-3.12-ml', 'node-22-browser'].map(img => (
+                  <button
+                    key={img}
+                    onClick={() => setVmImage(img)}
+                    className={cn(
+                      'text-xs font-mono px-2.5 py-1 rounded-md border',
+                      vmImage === img ? 'border-[#D97757] bg-[#332018] text-[#D97757]' : 'border-[#33312D] text-[#B0AAA0]',
+                    )}
+                  >
+                    {img}
+                  </button>
+                ))}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {VM_INCLUDES.map(inc => {
+                  const on = vmIncludes.includes(inc)
+                  return (
+                    <button
+                      key={inc}
+                      onClick={() => toggleInclude(inc)}
+                      className={cn(
+                        'text-xs px-2.5 py-1 rounded-md border transition-all',
+                        on ? 'border-[#D97757] bg-[#332018] text-[#F4F1EA]' : 'border-[#33312D] text-[#787268]',
+                      )}
+                    >
+                      {on ? '✓ ' : '+ '}{inc}
+                    </button>
+                  )
+                })}
+              </div>
+            </Card>
+          )}
         </div>
 
         {/* Options */}

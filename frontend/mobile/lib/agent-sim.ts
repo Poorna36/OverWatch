@@ -19,8 +19,69 @@ export interface SimulatedResponse {
  * so any prompt (plus the 3 core demo flows) feels live and responsive.
  */
 export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig): SimulatedResponse {
-  const lower = prompt.toLowerCase()
+  const lower = prompt.toLowerCase().trim()
   const targetEnv = env.mode === 'desktop' ? 'Remote Desktop' : `VM (${env.vmImage})`
+
+  // 0. Conversational follow-up ("yes", "sure", "ok", "do it", "go ahead", "no")
+  if (['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'do it', 'go ahead', 'please do'].includes(lower)) {
+    return {
+      title: 'Follow-up Confirmed',
+      steps: [
+        {
+          delayMs: 600,
+          toolCall: {
+            tool: 'agent.execute_followup',
+            args: { env: targetEnv, confirmed: true },
+            decision: 'allow',
+            riskTier: 'safe',
+            reversible: true,
+            durationMs: 140,
+          },
+          previewTitle: `${targetEnv} — Completed`,
+          previewLines: [
+            'Applying confirmed action...',
+            'Updated reminder & synced state',
+            '[OK] Done — sent confirmation to phone',
+          ],
+        },
+      ],
+      finalText:
+        `Done! I've completed that action on **${targetEnv}** and synced the update back to your phone. Let me know what you'd like to do next.`,
+    }
+  }
+
+  // 0b. Google Photos / App Store / Search Agent
+  if (lower.includes('photo') || lower.includes('store') || lower.includes('gmail') || lower.includes('email')) {
+    const isPhotos = lower.includes('photo')
+    const isStore = lower.includes('store')
+    return {
+      title: isPhotos ? 'Google Photos Organizer' : isStore ? 'App Store Check' : 'Gmail Assistant',
+      steps: [
+        {
+          delayMs: 650,
+          toolCall: {
+            tool: isPhotos ? 'google_photos.list_recent' : isStore ? 'app_store.search' : 'gmail.list_unread',
+            args: { env: targetEnv, limit: 10 },
+            decision: 'allow',
+            riskTier: 'safe',
+            reversible: true,
+            durationMs: 210,
+          },
+          previewTitle: `${targetEnv} — ${isPhotos ? 'Google Photos' : isStore ? 'App Store' : 'Gmail'}`,
+          previewLines: isPhotos
+            ? ['Scanning recent uploads...', 'Found 14 screenshots & 6 whiteboard photos', 'Suggested album: "Overwatch Hackathon"']
+            : isStore
+              ? ['Querying App Store catalog...', 'Found 3 matching tools', 'Ready for install (requires approval)']
+              : ['Reading unread priority threads...', '2 messages need reply (Hackathon, Mentor)', 'Draft ready in Gmail'],
+        },
+      ],
+      finalText: isPhotos
+        ? `I checked **Google Photos** on ${targetEnv} and found **14 screenshots** and **6 whiteboard photos** from this week.\n\nShould I group them into an **"Overwatch Hackathon"** album for you?`
+        : isStore
+          ? `I searched the **App Store** on ${targetEnv} and found the top matching packages. Want me to install one? (I'll ask for your approval before installing.)`
+          : `I scanned **Gmail** on ${targetEnv} — you have **2 priority emails** waiting. I drafted replies for both; should I open them for your review?`,
+    }
+  }
 
   // 1. Calendar / Reminders / Deadlines
   if (lower.includes('calendar') || lower.includes('reminder') || lower.includes('deadline')) {

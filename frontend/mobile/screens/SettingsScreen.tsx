@@ -18,6 +18,19 @@ interface SettingsScreenProps {
 export function SettingsScreen({ env, onChangeEnv, userEmail, onLogout }: SettingsScreenProps) {
   const [googleConnected, setGoogleConnected] = useState(true)
   const [approvalNotifs, setApprovalNotifs] = useState(true)
+  const [vmBootState, setVmBootState] = useState<'idle' | 'booting' | 'running'>('idle')
+  const [vmBootStep, setVmBootStep] = useState('')
+
+  async function handleStartVm() {
+    if (vmBootState === 'booting') return
+    setVmBootState('booting')
+    setVmBootStep(`Pulling ${env.vmImage}…`)
+    await new Promise(r => setTimeout(r, 700))
+    setVmBootStep(`Mounting ${env.vmMcpAgents.length} MCP agents…`)
+    await new Promise(r => setTimeout(r, 700))
+    setVmBootState('running')
+    setVmBootStep(`VM running · ${env.vmDeps.length} deps ready`)
+  }
 
   function toggleItem(list: string[], item: string, key: 'vmDeps' | 'vmIncludes' | 'vmMcpAgents') {
     const next = list.includes(item) ? list.filter(x => x !== item) : [...list, item]
@@ -138,6 +151,20 @@ export function SettingsScreen({ env, onChangeEnv, userEmail, onLogout }: Settin
                   )
                 })}
               </View>
+
+              <TouchableOpacity
+                style={[s.startVmBtn, vmBootState === 'running' && s.startVmBtnRunning]}
+                onPress={handleStartVm}
+                activeOpacity={0.85}
+              >
+                <Text style={[s.startVmText, vmBootState === 'running' && { color: T.green }]}>
+                  {vmBootState === 'idle'
+                    ? 'Start VM (Demo)'
+                    : vmBootState === 'booting'
+                      ? vmBootStep
+                      : `● ${vmBootStep}`}
+                </Text>
+              </TouchableOpacity>
             </View>
           )}
         </View>
@@ -226,4 +253,13 @@ const s = StyleSheet.create({
   chipActive: { borderColor: T.indigo, backgroundColor: T.indigoDim },
   chipText: { color: T.textSub, fontSize: 12 },
   chipTextActive: { color: T.indigo, fontWeight: '600' },
+
+  startVmBtn: {
+    marginTop: 8, backgroundColor: T.indigo, borderRadius: 12,
+    paddingVertical: 12, alignItems: 'center',
+  },
+  startVmBtnRunning: {
+    backgroundColor: T.greenDim, borderWidth: 1, borderColor: T.green + '55',
+  },
+  startVmText: { color: '#141413', fontSize: 13, fontWeight: '700' },
 })

@@ -35,8 +35,25 @@ export const VM_IMAGES = [
 ]
 
 export const VM_DEPS_OPTIONS = ['Python 3.12', 'Node.js 22', 'Playwright', 'Docker CLI', 'Git + SSH', 'Poppler PDF']
-export const VM_INCLUDES_OPTIONS = ['Workspace /src', 'Local Calendar Sync', 'Read-only .env', 'Downloads/']
-export const VM_MCP_OPTIONS = ['filesystem', 'terminal', 'browser', 'calendar', 'gmail']
+export const VM_INCLUDES_OPTIONS = [
+  'Workspace /src',
+  'Google Photos',
+  'Gmail',
+  'Google Calendar',
+  'App Store',
+  'Search Agent',
+  'Browser',
+]
+export const VM_MCP_OPTIONS = [
+  'filesystem',
+  'terminal',
+  'browser',
+  'search-agent',
+  'google-calendar',
+  'gmail',
+  'google-photos',
+  'app-store',
+]
 
 export const ROLES: Array<{
   id: AgentRole

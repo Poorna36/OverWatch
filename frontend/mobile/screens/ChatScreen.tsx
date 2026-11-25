@@ -253,7 +253,7 @@ export function ChatScreen({
           >
             <View style={s.heroWrap}>
               <View style={s.heroMark}>
-                <Text style={s.heroGlyph}>◈</Text>
+                <Text style={s.heroGlyph}>OW</Text>
               </View>
               <Text style={s.heroTitle}>What can I help with?</Text>
               <Text style={s.heroSub}>

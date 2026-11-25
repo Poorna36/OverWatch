@@ -54,7 +54,7 @@ export function LoginScreen({ env, onChangeEnv, onComplete }: LoginScreenProps) 
           {/* Brand */}
           <View style={s.brandRow}>
             <View style={s.logoMark}>
-              <Text style={s.logoGlyph}>◈</Text>
+              <Text style={s.logoGlyph}>OW</Text>
             </View>
             <View>
               <Text style={s.brandTitle}>Overwatch</Text>

@@ -6,12 +6,13 @@ import { PlanPreviewPage } from './pages/PlanPreviewPage'
 import { SessionPage } from './pages/SessionPage'
 import { AuditPage } from './pages/AuditPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { MobileBridgePopup } from './components/MobileBridgePopup'
 import './index.css'
 
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="flex h-full bg-zinc-950">
+      <div className="flex h-full bg-[#141413]">
         <Sidebar />
         <main className="flex-1 flex flex-col overflow-hidden">
           <Routes>
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>
+        <MobileBridgePopup />
       </div>
     </BrowserRouter>
   )

@@ -21,7 +21,7 @@ const VM_FRAMES: Array<{ title: string; type: 'terminal' | 'editor' | 'browser';
   {
     title: 'bash — /workspace',
     type: 'terminal',
-    content: `$ pip install requests\nCollecting requests (2.31.0)\n  Downloading... ━━━━━━━━━━ 62kB\nInstalling: certifi, urllib3, requests\n\u001b[32m✓ Successfully installed\u001b[0m`,
+    content: `$ pip install requests\nCollecting requests (2.31.0)\n  Downloading... 62kB\nInstalling: certifi, urllib3, requests\n[OK] Successfully installed`,
   },
   {
     title: 'fetch_title.py — editor',
@@ -31,7 +31,7 @@ const VM_FRAMES: Array<{ title: string; type: 'terminal' | 'editor' | 'browser';
   {
     title: 'bash — /workspace',
     type: 'terminal',
-    content: `$ python fetch_title.py https://example.com\nTitle: Example Domain\n\n$ python fetch_title.py https://python.org\nTitle: Welcome to Python.org\n\u001b[32m✓ Done\u001b[0m`,
+    content: `$ python fetch_title.py https://example.com\nTitle: Example Domain\n\n$ python fetch_title.py https://python.org\nTitle: Welcome to Python.org\n[OK] Done`,
   },
 ]
 
@@ -323,7 +323,7 @@ function VMWindow({ frame, typed, active, expanded, onToggle, lastTool }: {
         </View>
 
         <View style={vm.titleWrap}>
-          <Text style={vm.titleDot}>{frame.type === 'terminal' ? '$_' : frame.type === 'editor' ? '◧' : '⊙'}</Text>
+          <Text style={vm.titleDot}>{frame.type === 'terminal' ? '$_' : frame.type === 'editor' ? '</>' : 'web'}</Text>
           <Text style={vm.title} numberOfLines={1}>{frame.title}</Text>
         </View>
 
@@ -482,7 +482,7 @@ function MCPPanel({ session, onClose }: { session: Session; onClose: () => void 
     { id: 'browser',  label: 'browser',  icon: '◎', active: session.profile === 'general' },
     { id: 'desktop',  label: 'desktop',  icon: '□', active: true },
     { id: 'calendar', label: 'calendar', icon: '▦', active: session.profile === 'daily_routine' },
-    { id: 'gmail',    label: 'gmail',    icon: '◈', active: session.profile === 'daily_routine' },
+    { id: 'gmail',    label: 'gmail',    icon: 'M', active: session.profile === 'daily_routine' },
   ]
 
   const pipelineSteps: Array<{ step: string; label: string; status: 'pass' | 'skip' | 'wait' | 'fail'; isLast?: boolean }> = [

@@ -31,11 +31,12 @@ const Theme = {
 }
 
 function TabIcon({
-  symbol, label, focused,
-}: { symbol: string; label: string; focused: boolean }) {
+  code, label, focused,
+}: { code: 'chat' | 'home' | 'tasks' | 'settings'; label: string; focused: boolean }) {
+  const glyph = { chat: '>', home: '~', tasks: '=', settings: '*' }[code]
   return (
     <View style={[ti.wrap, focused && ti.wrapFocused]}>
-      <Text style={[ti.icon, focused && ti.iconFocused]}>{symbol}</Text>
+      <Text style={[ti.icon, focused && ti.iconFocused]}>{glyph}</Text>
       <Text style={[ti.label, focused && ti.labelFocused]}>{label}</Text>
     </View>
   )
@@ -95,7 +96,7 @@ function MainTabs({
       <Tab.Screen
         name="ChatTab"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon symbol="◈" label="Chat" focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon code="chat" label="Chat" focused={focused} />,
         }}
       >
         {(props) => (
@@ -115,7 +116,7 @@ function MainTabs({
       <Tab.Screen
         name="HomeTab"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon symbol="⊙" label="Home" focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon code="home" label="Home" focused={focused} />,
         }}
       >
         {(props) => (
@@ -138,7 +139,7 @@ function MainTabs({
       <Tab.Screen
         name="TasksTab"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon symbol="▤" label="Tasks" focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon code="tasks" label="Tasks" focused={focused} />,
         }}
       >
         {(props) => (
@@ -155,7 +156,7 @@ function MainTabs({
       <Tab.Screen
         name="SettingsTab"
         options={{
-          tabBarIcon: ({ focused }) => <TabIcon symbol="⚙" label="Settings" focused={focused} />,
+          tabBarIcon: ({ focused }) => <TabIcon code="settings" label="Settings" focused={focused} />,
         }}
       >
         {() => (
