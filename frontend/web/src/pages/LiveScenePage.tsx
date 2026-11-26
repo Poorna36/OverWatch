@@ -704,10 +704,10 @@ export function LiveScenePage() {
                     </div>
                     <div className="space-y-2">
                       {[
-                        { day: 'Thu 26 (Today)', title: 'Overwatch Architecture Review', time: '5:00 PM', urgent: true },
-                        { day: 'Fri 27', title: 'Hackathon Portal Submission', time: '11:59 PM', urgent: true },
-                        { day: 'Sat 29', title: 'API Security & Policy Check', time: '2:00 PM', urgent: false },
-                        { day: 'Mon 01', title: 'Sprint Demo & Retrospective', time: '10:00 AM', urgent: false },
+                        { day: 'Thu 26 (Today)', title: 'Project meeting with Shreya', time: '4:30 PM', urgent: true },
+                        { day: 'Thu 26 (Today)', title: 'Send Overwatch slides to Prof. Nair', time: '7:00 PM', urgent: true },
+                        { day: 'Fri 27', title: 'Dentist appointment — Indiranagar', time: '11:00 AM', urgent: false },
+                        { day: 'Sat 28', title: 'Debug auth module with Aarav', time: '6:00 PM', urgent: false },
                       ].map((ev, idx) => (
                         <div
                           key={ev.day}
@@ -740,10 +740,10 @@ export function LiveScenePage() {
                       </div>
                       <div className="space-y-2">
                         {[
-                          { text: 'Overwatch Demo Deck', due: 'Today 17:00', tag: 'URGENT' },
-                          { text: 'Hackathon Submission Form', due: 'Nov 27 23:59', tag: 'HIGH' },
-                          { text: 'API Security Review', due: 'Nov 29 14:00', tag: 'WORK' },
-                          { text: 'Sprint Retrospective', due: 'Dec 01 10:00', tag: 'TEAM' },
+                          { text: 'Meeting with Shreya (Meet)', due: 'Today 16:30', tag: 'URGENT' },
+                          { text: 'Slides for Prof. Nair', due: 'Today 19:00', tag: 'HIGH' },
+                          { text: 'Dentist — Indiranagar', due: 'Nov 27 11:00', tag: 'PERSONAL' },
+                          { text: 'Auth bug fix w/ Aarav', due: 'Nov 28 18:00', tag: 'DEV' },
                         ].map((r) => (
                           <div
                             key={r.text}

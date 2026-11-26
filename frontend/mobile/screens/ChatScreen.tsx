@@ -7,9 +7,9 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 import {
   ROLES, SUGGESTED_PROMPTS,
-  type AgentRole, type ChatMessage, type ChatThread, type EnvConfig, type ToolCallEvent,
+  type AgentRole, type ChatMessage, type ChatThread, type EnvConfig,
 } from '../lib/mock-data'
-import { buildSimulation } from '../lib/agent-sim'
+import type { RunningChatState } from '../App'
 import { T, DecisionPill, PulseDot, ProfileAvatar } from '../components/ui'
 
 const { width: SW } = Dimensions.get('window')
@@ -19,23 +19,24 @@ interface ChatScreenProps {
   activeChatId: string | null
   onSelectChat: (id: string | null) => void
   onUpdateChats: React.Dispatch<React.SetStateAction<ChatThread[]>>
+  runningMap: Record<string, RunningChatState>
+  onStartPrompt: (prompt: string, role: AgentRole, targetChatId: string | null) => void
   env: EnvConfig
   userEmail: string
   navigation: any
 }
 
 export function ChatScreen({
-  chats, activeChatId, onSelectChat, onUpdateChats, env, userEmail, navigation,
+  chats, activeChatId, onSelectChat, onUpdateChats,
+  runningMap, onStartPrompt, env, userEmail, navigation,
 }: ChatScreenProps) {
   const [input, setInput] = useState('')
   const [role, setRole] = useState<AgentRole>('general')
   const [rolePopupOpen, setRolePopupOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [mcpOpen, setMcpOpen] = useState(false)
-  const [running, setRunning] = useState(false)
-  const [execStatus, setExecStatus] = useState('... Executing task')
-  const [livePreview, setLivePreview] = useState<{ title: string; lines: string[] } | null>(null)
-  const [liveSteps, setLiveSteps] = useState<ToolCallEvent[]>([])
+  const [showLiveExec, setShowLiveExec] = useState(false)
+  const [scheduleHint, setScheduleHint] = useState(false)
 
   const insets = useSafeAreaInsets()
   const listRef = useRef<FlatList>(null)
@@ -44,6 +45,7 @@ export function ChatScreen({
   const activeChat = chats.find(c => c.id === activeChatId) ?? null
   const currentRole = activeChat ? activeChat.role : role
   const roleObj = ROLES.find(r => r.id === currentRole) ?? ROLES[0]
+  const activeRunState = activeChat ? runningMap[activeChat.id] : undefined
 
   function openSidebar() {
     setSidebarOpen(true)
@@ -58,8 +60,7 @@ export function ChatScreen({
 
   function handleNewChat() {
     onSelectChat(null)
-    setLivePreview(null)
-    setLiveSteps([])
+    setShowLiveExec(false)
     closeSidebar()
   }
 
@@ -71,106 +72,13 @@ export function ChatScreen({
     setRolePopupOpen(false)
   }
 
-  async function sendPrompt(rawText?: string) {
+  function sendPrompt(rawText?: string) {
     const prompt = (rawText ?? input).trim()
-    if (!prompt || running) return
-
+    if (!prompt || activeRunState) return
     setInput('')
-    setRunning(true)
-    setLiveSteps([])
-    setLivePreview(null)
-    setExecStatus(`... Executing task on ${env.mode === 'desktop' ? 'Remote Desktop' : 'VM'}`)
-
-    const sim = buildSimulation(prompt, currentRole, env)
-    const userMsg: ChatMessage = {
-      id: `u_${Date.now()}`,
-      sender: 'user',
-      text: prompt,
-      timestamp: new Date(),
-    }
-
-    let threadId = activeChat?.id
-    if (!threadId) {
-      threadId = `chat_${Date.now()}`
-      const newThread: ChatThread = {
-        id: threadId,
-        title: sim.title,
-        role: currentRole,
-        updatedAt: new Date(),
-        messages: [userMsg],
-      }
-      onUpdateChats(prev => [newThread, ...prev])
-      onSelectChat(threadId)
-    } else {
-      onUpdateChats(prev =>
-        prev.map(c =>
-          c.id === threadId
-            ? { ...c, updatedAt: new Date(), messages: [...c.messages, userMsg] }
-            : c
-        )
-      )
-    }
-
-    setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 80)
-
-    const collectedCalls: ToolCallEvent[] = []
-    let lastPreview: { title: string; lines: string[] } | undefined
-
-    for (let i = 0; i < sim.steps.length; i++) {
-      const step = sim.steps[i]
-      setExecStatus(step.statusLabel || '... Executing task')
-      setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 80)
-      await new Promise(r => setTimeout(r, step.delayMs))
-
-      if (step.previewTitle && step.previewLines) {
-        lastPreview = { title: step.previewTitle, lines: step.previewLines }
-        setLivePreview(lastPreview)
-      }
-
-      if (step.toolCall) {
-        const tc: ToolCallEvent = {
-          ...step.toolCall,
-          id: `tc_${Date.now()}_${i}`,
-          seq: i + 1,
-          timestamp: new Date(),
-        }
-        collectedCalls.push(tc)
-        setLiveSteps([...collectedCalls])
-      }
-      setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 80)
-    }
-
-    const agentMsg: ChatMessage = {
-      id: `a_${Date.now()}`,
-      sender: 'agent',
-      role: currentRole,
-      text: sim.finalText,
-      timestamp: new Date(),
-      toolCalls: collectedCalls,
-      previewTitle: lastPreview?.title,
-      previewLines: lastPreview?.lines,
-      approval: sim.approval
-        ? {
-          ...sim.approval,
-          id: `apr_${Date.now()}`,
-          createdAt: new Date(),
-          expiresAt: new Date(Date.now() + 120_000),
-        }
-        : undefined,
-      approvalStatus: sim.approval ? 'pending' : undefined,
-    }
-
-    onUpdateChats(prev =>
-      prev.map(c =>
-        c.id === threadId
-          ? { ...c, updatedAt: new Date(), messages: [...c.messages, agentMsg] }
-          : c
-      )
-    )
-
-    setLiveSteps([])
-    setRunning(false)
-    setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 100)
+    setShowLiveExec(false)
+    onStartPrompt(prompt, currentRole, activeChat?.id ?? null)
+    setTimeout(() => listRef.current?.scrollToEnd?.({ animated: true }), 120)
   }
 
   function handleMessageApproval(msgId: string, decision: 'approved' | 'denied') {
@@ -180,20 +88,20 @@ export function ChatScreen({
         c.id !== activeChat.id
           ? c
           : {
-            ...c,
-            messages: c.messages.map(m =>
-              m.id === msgId
-                ? {
-                  ...m,
-                  approvalStatus: decision,
-                  text:
-                    decision === 'approved'
-                      ? m.text + '\n\n✓ **Approved & submitted** via MCP gateway.'
-                      : m.text + '\n\n✕ **Denied** — submission cancelled.',
-                }
-                : m
-            ),
-          }
+              ...c,
+              messages: c.messages.map(m =>
+                m.id === msgId
+                  ? {
+                      ...m,
+                      approvalStatus: decision,
+                      text:
+                        decision === 'approved'
+                          ? m.text + '\n\n[OK] **Approved & executed** via MCP gateway.'
+                          : m.text + '\n\n[x] **Denied** — action cancelled.',
+                    }
+                  : m
+              ),
+            }
       )
     )
   }
@@ -225,7 +133,6 @@ export function ChatScreen({
 
         <View style={{ flex: 1 }} />
 
-        {/* Environment badge */}
         <TouchableOpacity
           style={s.envPill}
           onPress={() => navigation.navigate('SettingsTab')}
@@ -252,7 +159,6 @@ export function ChatScreen({
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 10 : 24}
       >
-        {/* Conversation or Empty State with Suggestions ABOVE */}
         {!activeChat || activeChat.messages.length === 0 ? (
           <ScrollView
             style={{ flex: 1 }}
@@ -309,32 +215,47 @@ export function ChatScreen({
               />
             )}
             ListFooterComponent={
-              running ? (
+              activeRunState ? (
                 <View style={s.streamingBox}>
                   <View style={s.streamingHead}>
                     <PulseDot color={T.indigo} size={7} />
-                    <Text style={s.streamingTitle}>{execStatus}</Text>
+                    <Text style={s.streamingTitle}>{activeRunState.statusLabel}</Text>
+                    <TouchableOpacity
+                      style={s.execToggleBtn}
+                      onPress={() => setShowLiveExec(e => !e)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={s.execToggleText}>
+                        {showLiveExec ? 'Hide execution ▴' : 'Show execution ▾'}
+                      </Text>
+                    </TouchableOpacity>
                   </View>
-                  <Text style={s.execBanner}>
-                    Working in background on {env.mode === 'desktop' ? 'Remote Desktop' : 'VM'} (3-5s sync)...
+
+                  <Text style={s.execSubHint}>
+                    You can switch chats or send another prompt while this finishes.
                   </Text>
-                  {liveSteps.map(tc => (
-                    <View key={tc.id} style={s.stepRow}>
-                      <Text style={s.stepTool}>{tc.tool}</Text>
-                      <DecisionPill decision={tc.decision} />
-                    </View>
-                  ))}
-                  {livePreview && (
-                    <View style={s.vmCard}>
-                      <View style={s.vmBar}>
-                        <View style={[s.dot, { backgroundColor: T.red }]} />
-                        <View style={[s.dot, { backgroundColor: T.amber }]} />
-                        <View style={[s.dot, { backgroundColor: T.green }]} />
-                        <Text style={s.vmTitle}>{livePreview.title}</Text>
-                      </View>
-                      {livePreview.lines.map((line, i) => (
-                        <Text key={i} style={s.vmLine}>{line}</Text>
+
+                  {showLiveExec && (
+                    <View style={{ gap: 8, marginTop: 4 }}>
+                      {activeRunState.steps.map(tc => (
+                        <View key={tc.id} style={s.stepRow}>
+                          <Text style={s.stepTool}>{tc.tool}</Text>
+                          <DecisionPill decision={tc.decision} />
+                        </View>
                       ))}
+                      {activeRunState.previewTitle && activeRunState.previewLines && (
+                        <View style={s.vmCard}>
+                          <View style={s.vmBar}>
+                            <View style={[s.dot, { backgroundColor: T.red }]} />
+                            <View style={[s.dot, { backgroundColor: T.amber }]} />
+                            <View style={[s.dot, { backgroundColor: T.green }]} />
+                            <Text style={s.vmTitle}>{activeRunState.previewTitle}</Text>
+                          </View>
+                          {activeRunState.previewLines.map((line, i) => (
+                            <Text key={i} style={s.vmLine}>{line}</Text>
+                          ))}
+                        </View>
+                      )}
                     </View>
                   )}
                 </View>
@@ -349,19 +270,19 @@ export function ChatScreen({
             <TextInput
               value={input}
               onChangeText={setInput}
-              placeholder={`Message ${roleObj.label}…`}
+              placeholder={`Message ${roleObj.label}...`}
               placeholderTextColor={T.textDim}
               style={s.composerInput}
               multiline
               maxLength={1000}
             />
             <TouchableOpacity
-              style={[s.sendBtn, (!input.trim() || running) && s.sendBtnDisabled]}
+              style={[s.sendBtn, (!input.trim() || Boolean(activeRunState)) && s.sendBtnDisabled]}
               onPress={() => sendPrompt()}
-              disabled={!input.trim() || running}
+              disabled={!input.trim() || Boolean(activeRunState)}
               activeOpacity={0.8}
             >
-              <Text style={s.sendIcon}>{running ? '…' : '↑'}</Text>
+              <Text style={s.sendIcon}>{activeRunState ? '...' : '↑'}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -405,14 +326,14 @@ export function ChatScreen({
             <View style={s.mcpHeader}>
               <Text style={s.mcpTitle}>MCP Gateway</Text>
               <TouchableOpacity onPress={() => setMcpOpen(false)}>
-                <Text style={s.mcpClose}>✕</Text>
+                <Text style={s.mcpClose}>x</Text>
               </TouchableOpacity>
             </View>
             <Text style={s.mcpSub}>
               {env.mode === 'desktop' ? `Bridge: ${env.desktopHost}` : `VM: ${env.vmImage}`}
             </Text>
             <Text style={s.mcpSection}>ACTIVE MCP AGENTS</Text>
-            {(env.mode === 'vm' ? env.vmMcpAgents : ['filesystem', 'terminal', 'browser', 'calendar']).map(a => (
+            {(env.mode === 'vm' ? env.vmMcpAgents : ['filesystem', 'terminal', 'browser', 'google-calendar', 'gmail']).map(a => (
               <View key={a} style={s.mcpRow}>
                 <PulseDot color={T.green} size={6} />
                 <Text style={s.mcpName}>{a}</Text>
@@ -430,7 +351,7 @@ export function ChatScreen({
         </TouchableOpacity>
       </Modal>
 
-      {/* ── Left Sidebar Drawer (Previous Chats) ── */}
+      {/* ── Left Sidebar Drawer (Previous Chats + Schedule Task) ── */}
       {sidebarOpen && (
         <View style={s.sidebarBackdrop}>
           <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={closeSidebar} />
@@ -438,7 +359,7 @@ export function ChatScreen({
             <View style={s.sidebarTop}>
               <Text style={s.sidebarBrand}>Overwatch</Text>
               <TouchableOpacity onPress={closeSidebar}>
-                <Text style={s.sidebarClose}>✕</Text>
+                <Text style={s.sidebarClose}>x</Text>
               </TouchableOpacity>
             </View>
 
@@ -446,26 +367,42 @@ export function ChatScreen({
               <Text style={s.newChatText}>+  New Chat</Text>
             </TouchableOpacity>
 
+            {/* Schedule Task button (requested demo UI button) */}
+            <TouchableOpacity
+              style={s.scheduleBtn}
+              onPress={() => setScheduleHint(h => !h)}
+              activeOpacity={0.8}
+            >
+              <Text style={s.scheduleBtnText}>⏱  Schedule Task</Text>
+              {scheduleHint && <Text style={s.scheduleSoon}>demo</Text>}
+            </TouchableOpacity>
+
             <Text style={s.sidebarLabel}>RECENT CHATS</Text>
             <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
               {chats.map(c => {
                 const isSel = c.id === activeChat?.id
+                const isBgRunning = Boolean(runningMap[c.id])
                 return (
                   <TouchableOpacity
                     key={c.id}
                     style={[s.chatItem, isSel && s.chatItemActive]}
                     onPress={() => {
                       onSelectChat(c.id)
-                      setLivePreview(null)
+                      setShowLiveExec(false)
                       closeSidebar()
                     }}
                     activeOpacity={0.75}
                   >
-                    <Text style={[s.chatItemTitle, isSel && { color: T.text }]} numberOfLines={1}>
-                      {c.title}
-                    </Text>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                      <Text style={[s.chatItemTitle, isSel && { color: T.text }]} numberOfLines={1}>
+                        {c.title}
+                      </Text>
+                      {isBgRunning && <PulseDot color={T.green} size={6} />}
+                    </View>
                     <Text style={s.chatItemMeta}>
-                      {c.role === 'general' ? 'General' : c.role === 'code' ? 'Code' : 'Research'} · {c.messages.length} msgs
+                      {isBgRunning
+                        ? 'Working on it...'
+                        : `${c.role === 'general' ? 'General' : c.role === 'code' ? 'Code' : 'Research'} · ${c.messages.length} msgs`}
                     </Text>
                   </TouchableOpacity>
                 )
@@ -496,6 +433,8 @@ export function ChatScreen({
 function MessageBubble({
   msg, onApprove, onDeny,
 }: { msg: ChatMessage; onApprove: () => void; onDeny: () => void }) {
+  const [execOpen, setExecOpen] = useState(false)
+
   if (msg.sender === 'user') {
     return (
       <View style={s.userRow}>
@@ -506,37 +445,56 @@ function MessageBubble({
     )
   }
 
+  const hasExec = Boolean((msg.toolCalls && msg.toolCalls.length > 0) || (msg.previewTitle && msg.previewLines))
+
   return (
     <View style={s.agentBlock}>
-      {/* Tool calls summary */}
-      {msg.toolCalls && msg.toolCalls.length > 0 && (
-        <View style={s.toolStrip}>
-          {msg.toolCalls.map(tc => (
-            <View key={tc.id} style={s.toolChip}>
-              <Text style={s.toolChipName}>{tc.tool}</Text>
-              <Text style={[
-                s.toolChipState,
-                { color: tc.decision === 'allow' ? T.green : tc.decision === 'ask' ? T.amber : T.red },
-              ]}>
-                {tc.decision}
-              </Text>
-            </View>
-          ))}
-        </View>
-      )}
+      {/* Collapsible Show execution dropdown */}
+      {hasExec && (
+        <View style={s.execContainer}>
+          <TouchableOpacity
+            style={s.execHeaderBtn}
+            onPress={() => setExecOpen(o => !o)}
+            activeOpacity={0.8}
+          >
+            <Text style={s.execHeaderText}>
+              {execOpen ? 'Hide execution ▴' : `Show execution (${msg.toolCalls?.length ?? 1} steps) ▾`}
+            </Text>
+          </TouchableOpacity>
 
-      {/* Inline Desktop/VM preview snapshot */}
-      {msg.previewTitle && msg.previewLines && (
-        <View style={s.vmCard}>
-          <View style={s.vmBar}>
-            <View style={[s.dot, { backgroundColor: T.red }]} />
-            <View style={[s.dot, { backgroundColor: T.amber }]} />
-            <View style={[s.dot, { backgroundColor: T.green }]} />
-            <Text style={s.vmTitle}>{msg.previewTitle}</Text>
-          </View>
-          {msg.previewLines.map((line, i) => (
-            <Text key={i} style={s.vmLine}>{line}</Text>
-          ))}
+          {execOpen && (
+            <View style={s.execBody}>
+              {msg.toolCalls && msg.toolCalls.length > 0 && (
+                <View style={s.toolStrip}>
+                  {msg.toolCalls.map(tc => (
+                    <View key={tc.id} style={s.toolChip}>
+                      <Text style={s.toolChipName}>{tc.tool}</Text>
+                      <Text style={[
+                        s.toolChipState,
+                        { color: tc.decision === 'allow' ? T.green : tc.decision === 'ask' ? T.amber : T.red },
+                      ]}>
+                        {tc.decision}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {msg.previewTitle && msg.previewLines && (
+                <View style={s.vmCard}>
+                  <View style={s.vmBar}>
+                    <View style={[s.dot, { backgroundColor: T.red }]} />
+                    <View style={[s.dot, { backgroundColor: T.amber }]} />
+                    <View style={[s.dot, { backgroundColor: T.green }]} />
+                    <Text style={s.vmTitle}>{msg.previewTitle}</Text>
+                  </View>
+                  {msg.previewLines.map((line, i) => (
+                    <Text key={i} style={s.vmLine}>{line}</Text>
+                  ))}
+                </View>
+              )}
+            </View>
+          )}
         </View>
       )}
 
@@ -606,7 +564,7 @@ const s = StyleSheet.create({
     backgroundColor: T.indigoDim, borderWidth: 1, borderColor: T.indigo + '55',
     alignItems: 'center', justifyContent: 'center', marginBottom: 14,
   },
-  heroGlyph: { color: T.indigo, fontSize: 22 },
+  heroGlyph: { color: T.indigo, fontSize: 16, fontWeight: '800', fontFamily: T.mono },
   heroTitle: { color: T.text, fontSize: 22, fontWeight: '700', letterSpacing: -0.4 },
   heroSub: { color: T.textDim, fontSize: 12, marginTop: 4 },
 
@@ -631,6 +589,15 @@ const s = StyleSheet.create({
   userText: { color: T.text, fontSize: 14, lineHeight: 20 },
 
   agentBlock: { gap: 8 },
+  execContainer: { alignSelf: 'flex-start', width: '100%', gap: 6 },
+  execHeaderBtn: {
+    alignSelf: 'flex-start',
+    backgroundColor: T.surface, borderWidth: 1, borderColor: T.border,
+    borderRadius: 9, paddingHorizontal: 10, paddingVertical: 5,
+  },
+  execHeaderText: { color: T.textSub, fontSize: 11, fontFamily: T.mono, fontWeight: '600' },
+  execBody: { gap: 8 },
+
   toolStrip: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   toolChip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -656,7 +623,12 @@ const s = StyleSheet.create({
   },
   streamingHead: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   streamingTitle: { color: T.text, fontSize: 13, fontWeight: '600', flex: 1 },
-  execBanner: { color: T.indigo, fontSize: 11, fontFamily: T.mono },
+  execToggleBtn: {
+    backgroundColor: T.elevated, borderWidth: 1, borderColor: T.borderMid,
+    borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4,
+  },
+  execToggleText: { color: T.indigo, fontSize: 11, fontFamily: T.mono, fontWeight: '600' },
+  execSubHint: { color: T.textDim, fontSize: 11 },
   stepRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   stepTool: { color: T.text, fontSize: 12, fontFamily: T.mono },
 
@@ -752,15 +724,25 @@ const s = StyleSheet.create({
   sidebarClose: { color: T.textDim, fontSize: 16, padding: 4 },
   newChatBtn: {
     backgroundColor: T.indigo, borderRadius: 12,
-    paddingVertical: 11, alignItems: 'center', marginBottom: 18,
+    paddingVertical: 11, alignItems: 'center', marginBottom: 8,
   },
   newChatText: { color: '#141413', fontSize: 13, fontWeight: '700' },
+  scheduleBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: T.elevated, borderWidth: 1, borderColor: T.borderMid,
+    borderRadius: 12, paddingVertical: 10, marginBottom: 18,
+  },
+  scheduleBtnText: { color: T.text, fontSize: 13, fontWeight: '600' },
+  scheduleSoon: {
+    color: T.indigo, fontSize: 10, fontFamily: T.mono,
+    backgroundColor: T.indigoDim, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6,
+  },
   sidebarLabel: { color: T.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 1, marginBottom: 8 },
   chatItem: {
     paddingVertical: 10, paddingHorizontal: 10, borderRadius: 10, marginBottom: 4,
   },
   chatItemActive: { backgroundColor: T.elevated, borderWidth: 1, borderColor: T.border },
-  chatItemTitle: { color: T.textSub, fontSize: 13, fontWeight: '600' },
+  chatItemTitle: { color: T.textSub, fontSize: 13, fontWeight: '600', flex: 1 },
   chatItemMeta: { color: T.textDim, fontSize: 11, marginTop: 2 },
   sidebarFooter: {
     borderTopWidth: 1, borderTopColor: T.border, paddingTop: 12, gap: 4,

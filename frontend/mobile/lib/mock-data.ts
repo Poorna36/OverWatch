@@ -8,6 +8,37 @@ export type RiskTier = 'safe' | 'sensitive' | 'critical'
 export type BandwidthTier = 'video' | 'screenshots' | 'text'
 export type AgentRole = 'general' | 'code' | 'research'
 export type EnvMode = 'desktop' | 'vm'
+export type PermissionLevel = 'allow_always' | 'ask_every_time' | 'read_only' | 'deny'
+
+export interface ScopeToolItem {
+  id: string
+  name: string
+  category: 'tool' | 'dependency'
+  desc: string
+  version: string
+  inUse: boolean
+  stopped: boolean
+  permission: PermissionLevel
+}
+
+export const INITIAL_SCOPE_TOOLS: ScopeToolItem[] = [
+  { id: 'terminal',        name: 'terminal',        category: 'tool',       desc: 'Shell execution & pytest runner',     version: 'bash 5.2',    inUse: true,  stopped: false, permission: 'allow_always' },
+  { id: 'filesystem',      name: 'filesystem',      category: 'tool',       desc: 'Scoped /workspace file read & write', version: 'mcp-fs 1.4',  inUse: true,  stopped: false, permission: 'allow_always' },
+  { id: 'google-calendar', name: 'google-calendar', category: 'tool',       desc: 'Calendar events & reminders bridge',  version: 'gcal v3',     inUse: true,  stopped: false, permission: 'read_only' },
+  { id: 'gmail',           name: 'gmail',           category: 'tool',       desc: 'Inbox read & draft composer',         version: 'gmail v1',    inUse: true,  stopped: false, permission: 'ask_every_time' },
+  { id: 'browser',         name: 'browser',         category: 'tool',       desc: 'Chromium DOM fill & navigation',      version: 'cr-131',      inUse: false, stopped: false, permission: 'ask_every_time' },
+  { id: 'search-agent',    name: 'search-agent',    category: 'tool',       desc: 'Web & arXiv retrieval agent',         version: 'mcp-2.1',     inUse: false, stopped: false, permission: 'allow_always' },
+  { id: 'google-photos',   name: 'google-photos',   category: 'tool',       desc: 'Media scan & album organizer',        version: 'gphotos v1',  inUse: false, stopped: false, permission: 'read_only' },
+  { id: 'app-store',       name: 'app-store',       category: 'tool',       desc: 'Package & desktop app catalog',       version: 'store-1.0',   inUse: false, stopped: false, permission: 'ask_every_time' },
+  { id: 'python-3.12',     name: 'python-3.12',     category: 'dependency', desc: 'Python runtime & virtual env',        version: '3.12.7',      inUse: false, stopped: false, permission: 'allow_always' },
+  { id: 'pytest',          name: 'pytest',          category: 'dependency', desc: 'Automated Python test suite',         version: '8.3.3',       inUse: false, stopped: false, permission: 'allow_always' },
+  { id: 'playwright',      name: 'playwright',      category: 'dependency', desc: 'Headless browser automation',         version: '1.49.0',      inUse: false, stopped: false, permission: 'allow_always' },
+  { id: 'git',             name: 'git',             category: 'dependency', desc: 'Repo status, diff & branch state',    version: '2.47.1',      inUse: false, stopped: false, permission: 'allow_always' },
+  { id: 'docker-cli',      name: 'docker-cli',      category: 'dependency', desc: 'Sandbox container builder',           version: '27.3.1',      inUse: false, stopped: false, permission: 'ask_every_time' },
+  { id: 'poppler-pdf',     name: 'poppler-pdf',     category: 'dependency', desc: 'PDF text & table extraction',         version: '24.08',       inUse: false, stopped: false, permission: 'allow_always' },
+]
+
+export const EXTRA_IMAGE_PACKAGES = ['ffmpeg', 'pandas', 'redis-cli', 'sqlite3', 'curl', 'ripgrep']
 
 export interface EnvConfig {
   mode: EnvMode
@@ -187,7 +218,7 @@ export const MOCK_CHATS: ChatThread[] = [
         id: 'm2',
         sender: 'agent',
         role: 'general',
-        text: 'I scanned your Calendar and Reminders via the MCP gateway:\n\n• **Today, 5:00 PM** — Submit Hackathon Architecture Deck\n• **Tomorrow, 11:59 PM** — Cloud Credits Form (High Priority)\n• **Fri, 2:00 PM** — Team Sync & Demo Rehearsal\n\nNo scheduling conflicts detected for tomorrow morning.',
+        text: 'Checked your Calendar and Reminders:\n\n• **Today, 4:30 PM** — Project meeting with Shreya (Google Meet)\n• **Today, 7:00 PM** — Submit Overwatch slides to Prof. Nair\n• **Tomorrow, 11:00 AM** — Dentist appointment (Indiranagar)\n• **Sat, Nov 28, 6:00 PM** — Debug auth module with Aarav',
         timestamp: ago(1800),
         toolCalls: [
           { id: 'c1', seq: 1, timestamp: ago(1815), tool: 'calendar.list_events', args: { range: 'next_7_days' }, decision: 'allow', riskTier: 'safe', reversible: true, durationMs: 142 },

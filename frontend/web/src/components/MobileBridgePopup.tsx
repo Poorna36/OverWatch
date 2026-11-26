@@ -32,11 +32,11 @@ const SCENARIOS: DemoScenario[] = [
         tool: 'reminders.scan',
         detail: 'Browsing Reminders & sorting urgent deadlines',
         screenLines: [
-          '> Reading Reminders lists [Work, University, Personal]...',
-          '  [!] Today 17:00   Overwatch Demo Deck',
-          '  [!] Nov 27 23:59  Hackathon Submission Portal',
-          '  [ ] Nov 29 14:00  API Security Review',
-          '  [ ] Dec 01 10:00  Sprint Retrospective',
+          '> Reading Reminders lists [College, Project, Personal]...',
+          '  [!] Today 16:30  Project meeting with Shreya',
+          '  [!] Today 19:00  Send slides to Prof. Nair',
+          '  [ ] Nov 27 11:00 Dentist appt — Indiranagar',
+          '  [ ] Nov 28 18:00 Debug auth module with Aarav',
         ],
       },
       {

@@ -15,22 +15,61 @@ export interface SimulatedResponse {
   approval?: Omit<ApprovalRequest, 'id' | 'createdAt' | 'expiresAt'>
 }
 
+export interface SimulationOptions {
+  gmailBlocked?: boolean
+  stoppedTools?: string[]
+}
+
 /**
  * Generates a realistic, prompt-aware MCP execution plan & response
- * with 3-5 second background pacing per step.
+ * with ~11-12s background execution pacing and tool permission checks.
  */
-export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig): SimulatedResponse {
+export function buildSimulation(
+  prompt: string,
+  role: AgentRole,
+  env: EnvConfig,
+  opts: SimulationOptions = {},
+): SimulatedResponse {
   const lower = prompt.toLowerCase().trim()
   const targetEnv = env.mode === 'desktop' ? 'Remote Desktop' : `VM (${env.vmImage})`
 
-  // 0. Conversational follow-up ("yes", "sure", "ok", "do it", "go ahead", "no")
+  // Check if user requested Gmail/email while gmail is stopped in Permissions
+  if ((lower.includes('gmail') || lower.includes('email') || lower.includes('mail') || lower.includes('draft')) && opts.gmailBlocked) {
+    return {
+      title: 'Gmail Draft (Blocked)',
+      steps: [
+        {
+          delayMs: 1400,
+          statusLabel: 'Checking MCP permissions...',
+          toolCall: {
+            tool: 'gmail.create_draft',
+            args: { env: targetEnv, prompt: prompt.slice(0, 40) },
+            decision: 'block',
+            riskTier: 'sensitive',
+            reversible: false,
+            reason: 'POLICY_DENY — gmail access stopped by user',
+          },
+          previewTitle: 'MCP Gateway — Blocked',
+          previewLines: [
+            'Checking tool scope: gmail',
+            '[BLOCKED] gmail server is stopped in Permissions',
+            'Aborted execution cleanly',
+          ],
+        },
+      ],
+      finalText:
+        `Gmail access is not available by MCP agent right now because **gmail** was stopped in your Tools & Permissions tab.\n\nRe-enable **gmail** in the **Tools** tab if you want me to compose or read drafts.`,
+    }
+  }
+
+  // 0. Conversational follow-up ("yes", "sure", "ok", "do it", "go ahead")
   if (['yes', 'yeah', 'yep', 'sure', 'ok', 'okay', 'do it', 'go ahead', 'please do'].includes(lower)) {
     return {
       title: 'Follow-up Confirmed',
       steps: [
         {
-          delayMs: 3200,
-          statusLabel: `Executing task on ${targetEnv}...`,
+          delayMs: 3600,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'agent.execute_followup',
             args: { env: targetEnv, confirmed: true },
@@ -46,54 +85,133 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
             '[OK] Done — sent confirmation to phone',
           ],
         },
+        {
+          delayMs: 3800,
+          statusLabel: 'Verifying state...',
+        },
+        {
+          delayMs: 3700,
+          statusLabel: 'Finalizing response...',
+        },
       ],
       finalText:
-        `Done! I've completed that action on **${targetEnv}** and synced the update back to your phone. Let me know what you'd like to do next.`,
+        `Done! I've completed that on **${targetEnv}** and synced the update back. Let me know what you'd like to tackle next.`,
     }
   }
 
-  // 0b. Google Photos / App Store / Gmail
-  if (lower.includes('photo') || lower.includes('store') || lower.includes('gmail') || lower.includes('email')) {
-    const isPhotos = lower.includes('photo')
-    const isStore = lower.includes('store')
+  // 0b. Gmail draft prompt (e.g. "draft a gmail for me to Shreya")
+  if (lower.includes('gmail') || lower.includes('email') || lower.includes('mail') || lower.includes('draft')) {
     return {
-      title: isPhotos ? 'Google Photos Organizer' : isStore ? 'App Store Check' : 'Gmail Assistant',
+      title: 'Gmail Draft — Shreya',
       steps: [
         {
-          delayMs: 3400,
-          statusLabel: `Executing task — opening ${isPhotos ? 'Google Photos' : isStore ? 'App Store' : 'Gmail'} on ${targetEnv}...`,
+          delayMs: 3600,
+          statusLabel: 'Working on it...',
           toolCall: {
-            tool: isPhotos ? 'google_photos.list_recent' : isStore ? 'app_store.search' : 'gmail.list_unread',
+            tool: 'gmail.list_threads',
+            args: { query: 'Shreya project', limit: 3 },
+            decision: 'allow',
+            riskTier: 'safe',
+            reversible: true,
+            durationMs: 210,
+          },
+          previewTitle: `${targetEnv} — Gmail`,
+          previewLines: [
+            'Found thread: "Re: Today 4:30 PM sync"',
+            'Loading context from project calendar...',
+          ],
+        },
+        {
+          delayMs: 4100,
+          statusLabel: 'Working on it...',
+          toolCall: {
+            tool: 'gmail.create_draft',
+            args: { to: 'shreya@team.dev', subject: 'Agenda for 4:30 PM project meeting' },
+            decision: 'allow',
+            riskTier: 'safe',
+            reversible: true,
+            durationMs: 310,
+          },
+          previewTitle: `${targetEnv} — Gmail Draft`,
+          previewLines: [
+            'To: shreya@team.dev',
+            'Subject: Agenda for 4:30 PM project meeting',
+            'Body: Hi Shreya, sharing the updated demo points...',
+            '[OK] Draft saved (#dr_402)',
+          ],
+        },
+        {
+          delayMs: 3600,
+          statusLabel: 'Checking send policy...',
+          toolCall: {
+            tool: 'gmail.send',
+            args: { draftId: 'dr_402' },
+            decision: 'ask',
+            riskTier: 'sensitive',
+            reversible: false,
+            reason: 'Requires your approval before sending',
+          },
+        },
+      ],
+      approval: {
+        tool: 'gmail.send',
+        args: { to: 'shreya@team.dev', draftId: 'dr_402' },
+        riskTier: 'sensitive',
+        reversible: false,
+        summary: 'Send drafted email to shreya@team.dev?',
+      },
+      finalText:
+        `I drafted the Gmail to **shreya@team.dev** on ${targetEnv}:\n\n` +
+        `*"Hi Shreya, quick update ahead of our 4:30 PM project meeting — the Python gateway module is running and tests pass. Want to review the slides right after?"*\n\n` +
+        `The draft is saved (` + '`#dr_402`' + `). Tap **Approve** below if you want me to send it, or keep it as a draft.`,
+    }
+  }
+
+  // 0c. Google Photos / App Store
+  if (lower.includes('photo') || lower.includes('store')) {
+    const isPhotos = lower.includes('photo')
+    return {
+      title: isPhotos ? 'Google Photos Organizer' : 'App Store Check',
+      steps: [
+        {
+          delayMs: 3700,
+          statusLabel: 'Working on it...',
+          toolCall: {
+            tool: isPhotos ? 'google_photos.list_recent' : 'app_store.search',
             args: { env: targetEnv, limit: 10 },
             decision: 'allow',
             riskTier: 'safe',
             reversible: true,
             durationMs: 210,
           },
-          previewTitle: `${targetEnv} — ${isPhotos ? 'Google Photos' : isStore ? 'App Store' : 'Gmail'}`,
+          previewTitle: `${targetEnv} — ${isPhotos ? 'Google Photos' : 'App Store'}`,
           previewLines: isPhotos
             ? ['Scanning recent uploads...', 'Found 14 screenshots & 6 whiteboard photos', 'Suggested album: "Overwatch Hackathon"']
-            : isStore
-              ? ['Querying App Store catalog...', 'Found 3 matching tools', 'Ready for install (requires approval)']
-              : ['Reading unread priority threads...', '2 messages need reply (Hackathon, Mentor)', 'Draft ready in Gmail'],
+            : ['Querying App Store catalog...', 'Found 3 matching tools', 'Ready for install (requires approval)'],
+        },
+        {
+          delayMs: 4100,
+          statusLabel: 'Working on it...',
+        },
+        {
+          delayMs: 3600,
+          statusLabel: 'Preparing summary...',
         },
       ],
       finalText: isPhotos
         ? `I checked **Google Photos** on ${targetEnv} and found **14 screenshots** and **6 whiteboard photos** from this week.\n\nShould I group them into an **"Overwatch Hackathon"** album for you?`
-        : isStore
-          ? `I searched the **App Store** on ${targetEnv} and found the top matching packages. Want me to install one? (I'll ask for your approval before installing.)`
-          : `I scanned **Gmail** on ${targetEnv} — you have **2 priority emails** waiting. I drafted replies for both; should I open them for your review?`,
+        : `I searched the **App Store** on ${targetEnv} and found the top matching packages. Want me to install one?`,
     }
   }
 
-  // 1. Calendar / Reminders / Deadlines
+  // 1. Calendar / Reminders / Deadlines (~11.6s total)
   if (lower.includes('calendar') || lower.includes('reminder') || lower.includes('deadline')) {
     return {
       title: 'Calendar Deadlines & Reminders',
       steps: [
         {
-          delayMs: 2950,
-          statusLabel: `Executing task — opening Calendar on ${targetEnv}...`,
+          delayMs: 3700,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'calendar.open',
             args: { env: targetEnv, view: 'agenda' },
@@ -105,16 +223,16 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           previewTitle: `${targetEnv} — Calendar`,
           previewLines: [
             'Opening Calendar app...',
-            'Reading events: Nov 26 - Dec 03',
-            'Found 6 scheduled events, 4 reminders',
+            'Reading events: Nov 26 - Dec 02',
+            'Found 4 meetings & 3 reminders',
           ],
         },
         {
-          delayMs: 4450,
-          statusLabel: 'Executing task — browsing Reminders & due dates...',
+          delayMs: 4200,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'reminders.scan',
-            args: { lists: ['Work', 'University', 'Personal'], includeOverdue: true },
+            args: { lists: ['College', 'Project', 'Personal'], includeOverdue: true },
             decision: 'allow',
             riskTier: 'safe',
             reversible: true,
@@ -122,15 +240,15 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           },
           previewTitle: `${targetEnv} — Reminders`,
           previewLines: [
-            '[!] Today 17:00  Overwatch Demo Deck',
-            '[!] Nov 27 23:59  Hackathon Submission Portal',
-            '[ ] Nov 29 14:00  API Security Review',
-            '[ ] Dec 01 10:00  Sprint Retrospective',
+            '[!] Today 16:30  Project meeting with Shreya (Meet)',
+            '[!] Today 19:00  Send slides to Prof. Nair',
+            '[ ] Nov 27 11:00 Dentist appt - Indiranagar',
+            '[ ] Nov 28 18:00 Fix auth bug with Aarav',
           ],
         },
         {
-          delayMs: 3000,
-          statusLabel: 'Executing task — checking calendar conflicts...',
+          delayMs: 3600,
+          statusLabel: 'Checking conflicts...',
           toolCall: {
             tool: 'calendar.check_conflicts',
             args: { windowHours: 72 },
@@ -142,16 +260,16 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
         },
       ],
       finalText:
-        `Here are your upcoming deadlines from Calendar & Reminders (checked on ${targetEnv}):\n\n` +
-        `1. **Today · 5:00 PM** — Overwatch Demo Deck *(Urgent)*\n` +
-        `2. **Thu, Nov 27 · 11:59 PM** — Hackathon Submission Portal\n` +
-        `3. **Sat, Nov 29 · 2:00 PM** — API Security Review\n` +
-        `4. **Mon, Dec 1 · 10:00 AM** — Sprint Retrospective\n\n` +
-        `All 4 reminders are clear of calendar conflicts. Want me to set a 1-hour alert before today's 5:00 PM deadline?`,
+        `Here is your schedule and upcoming deadlines (checked on ${targetEnv}):\n\n` +
+        `1. **Today · 4:30 PM** — Project meeting with Shreya *(Google Meet)*\n` +
+        `2. **Today · 7:00 PM** — Send Overwatch slides to Prof. Nair *(Urgent)*\n` +
+        `3. **Tomorrow · 11:00 AM** — Dentist appointment at Indiranagar\n` +
+        `4. **Sat, Nov 28 · 6:00 PM** — Debug auth module with Aarav\n\n` +
+        `Want me to draft an email to Shreya with the agenda before 4:30 PM?`,
     }
   }
 
-  // 2. Website / Application Form Filling
+  // 2. Website / Application Form Filling (~11.8s total)
   if (lower.includes('website') || lower.includes('form') || lower.includes('fill') || lower.includes('apply') || lower.includes('http')) {
     const urlMatch = prompt.match(/https?:\/\/[^\s]+/i)
     const targetUrl = urlMatch ? urlMatch[0] : 'https://portal.example.org/apply'
@@ -160,8 +278,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       title: 'Application Form Assistant',
       steps: [
         {
-          delayMs: 3650,
-          statusLabel: `Executing task — opening ${targetUrl} on ${targetEnv}...`,
+          delayMs: 3800,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'browser.navigate',
             args: { url: targetUrl, env: targetEnv },
@@ -174,12 +292,12 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           previewLines: [
             `GET ${targetUrl}`,
             '200 OK · Loaded "2026 Application Form"',
-            'Detected 6 input fields + 1 file upload',
+            'Detected 6 input fields + 1 upload',
           ],
         },
         {
-          delayMs: 4750,
-          statusLabel: 'Executing task — filling form fields from profile...',
+          delayMs: 4300,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'browser.fill_fields',
             args: {
@@ -203,8 +321,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 3000,
-          statusLabel: 'Executing task — requesting submission permission...',
+          delayMs: 3500,
+          statusLabel: 'Checking submission gate...',
           toolCall: {
             tool: 'browser.submit_form',
             args: { url: targetUrl, action: 'click #submit-btn' },
@@ -224,21 +342,21 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       },
       finalText:
         `I opened **${targetUrl}** on ${targetEnv} and filled out all 6 fields using your profile.\n\n` +
-        `The MCP gateway paused right before clicking **Submit** because submitting an external form is irreversible. Tap **Approve** below to submit, or **Deny** to review it yourself.`,
+        `The MCP gateway paused right before clicking **Submit** because submitting an external form is irreversible. Tap **Approve** below to submit, or **Deny** to inspect it yourself.`,
     }
   }
 
-  // 3. Python Project / Resume Building
+  // 3. Python Project / Resume Building (~11.5s total)
   if (lower.includes('python') || lower.includes('resume') || lower.includes('project') || lower.includes('build') || lower.includes('code')) {
     return {
       title: 'Python Project Workspace',
       steps: [
         {
-          delayMs: 3200,
-          statusLabel: `Executing task — scanning Python workspace on ${targetEnv}...`,
+          delayMs: 3600,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'files.scan_workspace',
-            args: { path: '/workspace/python-project', env: targetEnv },
+            args: { path: '/workspace/overwatch-agent', env: targetEnv },
             decision: 'allow',
             riskTier: 'safe',
             reversible: true,
@@ -253,8 +371,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 4850,
-          statusLabel: 'Executing task — running pytest test suite...',
+          delayMs: 4300,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'terminal.run',
             args: { cmd: 'pytest tests/ -q' },
@@ -272,11 +390,11 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
           ],
         },
         {
-          delayMs: 3200,
-          statusLabel: 'Executing task — resuming code changes in gateway.py...',
+          delayMs: 3600,
+          statusLabel: 'Working on it...',
           toolCall: {
             tool: 'files.edit',
-            args: { path: 'src/agent/gateway.py', change: 'Added retry & timeout guard' },
+            args: { path: 'src/agent/gateway.py', change: 'Added async timeout & retry guard' },
             decision: 'allow',
             riskTier: 'safe',
             reversible: true,
@@ -286,30 +404,30 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       ],
       finalText:
         `Resumed your Python project on **${targetEnv}**:\n\n` +
-        `• Located unfinished changes in \`src/agent/gateway.py\`\n` +
+        `• Picked up unfinished changes in \`src/agent/gateway.py\`\n` +
         `• Ran \`pytest tests/ -q\` — **14 passed** in 0.84s\n` +
-        `• Added the async timeout guard you left off on\n\n` +
-        `Next up: should I wire the CLI entrypoint in \`main.py\` or run the integration suite?`,
+        `• Added the async timeout & retry guard\n\n` +
+        `Ready whenever you want to wire the CLI entrypoint or push to GitHub.`,
     }
   }
 
-  // 4. Dynamic fallback for ANY custom prompt the user types
+  // 4. Dynamic fallback for ANY custom prompt (~11.2s total)
   const snippet = prompt.trim().slice(0, 44) + (prompt.trim().length > 44 ? '...' : '')
   const toolByRole: Record<AgentRole, { tool: string; args: Record<string, unknown>; preview: string[] }> = {
     general: {
       tool: 'desktop.inspect',
       args: { query: snippet, env: targetEnv },
-      preview: [`Target: ${targetEnv}`, `Task: "${snippet}"`, 'Checking active windows & context...', '[OK] Action plan ready'],
+      preview: [`Target: ${targetEnv}`, `Task: "${snippet}"`, 'Checking active windows...', '[OK] Action completed'],
     },
     code: {
       tool: 'terminal.run',
       args: { cmd: `overwatch-exec --task "${snippet}"`, env: targetEnv },
-      preview: [`$ overwatch-exec --task "${snippet}"`, 'Inspecting workspace files...', '[OK] Checks completed (exit 0)'],
+      preview: [`$ overwatch-exec --task "${snippet}"`, 'Inspecting workspace files...', '[OK] Checks passed (exit 0)'],
     },
     research: {
       tool: 'browser.search',
       args: { q: snippet, sources: 4 },
-      preview: [`Searching: "${snippet}"`, 'Fetched 4 primary sources', 'Cross-checking citations...', '[OK] Summary compiled'],
+      preview: [`Searching: "${snippet}"`, 'Fetched 4 primary sources', '[OK] Summary compiled'],
     },
   }
   const picked = toolByRole[role]
@@ -318,8 +436,8 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
     title: snippet || 'New Task',
     steps: [
       {
-        delayMs: 3400,
-        statusLabel: `Executing task on ${targetEnv}...`,
+        delayMs: 3800,
+        statusLabel: 'Working on it...',
         toolCall: {
           tool: picked.tool,
           args: picked.args,
@@ -332,8 +450,12 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
         previewLines: picked.preview,
       },
       {
-        delayMs: 3000,
-        statusLabel: 'Executing task — verifying MCP policy & audit log...',
+        delayMs: 4100,
+        statusLabel: 'Working on it...',
+      },
+      {
+        delayMs: 3400,
+        statusLabel: 'Verifying policy...',
         toolCall: {
           tool: 'policy.verify',
           args: { role, mode: env.mode },
@@ -345,7 +467,7 @@ export function buildSimulation(prompt: string, role: AgentRole, env: EnvConfig)
       },
     ],
     finalText:
-      `Executed **"${prompt.trim()}"** under **${role === 'general' ? 'General Work' : role === 'code' ? 'Code' : 'Research'}** mode on **${targetEnv}**.\n\n` +
-      `All MCP gateway checks passed. Tell me if you want to refine the output, run another step, or switch to ${env.mode === 'desktop' ? 'an isolated VM' : 'Remote Desktop'}.`,
+      `Done with **"${prompt.trim()}"** under **${role === 'general' ? 'General Work' : role === 'code' ? 'Code' : 'Research'}** mode on **${targetEnv}**.\n\n` +
+      `All MCP gateway checks passed. Tell me what you'd like to do next.`,
   }
 }
