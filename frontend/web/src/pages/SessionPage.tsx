@@ -1,263 +1,110 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { MOCK_SESSIONS, DEMO_EVENTS, type Session, type ToolCallEvent, type ApprovalRequest } from '../lib/mock-data'
-import { LiveView } from '../components/LiveView'
-import { ToolCallFeed } from '../components/ToolCallFeed'
-import { ApprovalModal } from '../components/ApprovalModal'
-import { StatusDot, TierBadge, BudgetBar, Button } from '../components/ui'
-import { formatDuration } from '../lib/utils'
+import { Link, useParams } from "react-router-dom";
+import { useState } from "react";
+import { ArrowLeft, Hand, MonitorPlay, Pause, Play, Plus, Power, Image, Type, Wifi } from "lucide-react";
+import { toast } from "../lib/toast";
+import { PROFILES } from "../lib/mock";
+import { useStore, type Tier } from "../lib/store";
+import { ApprovalSheet } from "../components/ApprovalSheet";
+import { Btn, Budget, CallRow, Card, StateBadge } from "../components/ui";
+import { cn } from "../lib/utils";
+
+const TIERS: { id: Tier; label: string; icon: typeof Image }[] = [
+  { id: "video", label: "Video", icon: MonitorPlay },
+  { id: "screenshot", label: "Screens", icon: Image },
+  { id: "text", label: "Text", icon: Type },
+];
+const relativeSince = (iso: string) => {
+  const minutes = Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 60000));
+  return minutes < 1 ? "just now" : minutes < 60 ? `${minutes}m ago` : `${Math.floor(minutes / 60)}h ago`;
+};
 
 export function SessionPage() {
-  const { id } = useParams<{ id: string }>()
-  const navigate = useNavigate()
+  const { id } = useParams<{ id: string }>();
+  const store = useStore();
+  const s = store.sessions.find((x) => x.id === id);
+  const [review, setReview] = useState<number | null>(null);
+  if (!s) return <Card className="text-center"><p>Session not found.</p><Link to="/" className="text-primary underline">Back to sessions</Link></Card>;
+  const pending = s.calls.find((c) => c.status === "pending");
+  const reviewing = s.calls.find((c) => c.seq === review);
+  const ended = s.state === "ENDED";
+  const paused = s.state === "PAUSED";
+  const feed = [...s.calls].reverse();
 
-  const seed = MOCK_SESSIONS.find(s => s.id === id) ?? MOCK_SESSIONS[0]
-  const [session, setSession] = useState<Session>({ ...seed, toolCalls: [...seed.toolCalls] })
-  const [demoRunning, setDemoRunning] = useState(false)
-  const [elapsed, setElapsed] = useState(0)
-  const [showLiveView, setShowLiveView] = useState(true)
-
-  // Live clock
-  useEffect(() => {
-    const start = Date.now()
-    const id = setInterval(() => setElapsed(Date.now() - start), 1000)
-    return () => clearInterval(id)
-  }, [])
-
-  // Demo auto-play
-  async function runDemo() {
-    setDemoRunning(true)
-    setSession(s => ({ ...s, toolCalls: [], state: 'STARTING', pendingApprovals: [] }))
-    await new Promise(r => setTimeout(r, 1000))
-    setSession(s => ({ ...s, state: 'ACTIVE' }))
-
-    let seq = 1
-    for (const { delay, event } of DEMO_EVENTS) {
-      await new Promise(r => setTimeout(r, delay))
-      const newCall: ToolCallEvent = {
-        ...event,
-        id: `demo_${seq}`,
-        seq,
-        timestamp: new Date(),
-      }
-      setSession(s => ({
-        ...s,
-        toolCalls: [...s.toolCalls, newCall],
-        budget: { ...s.budget, used: Math.min(s.budget.used + 6, s.budget.total) },
-        pendingApprovals: event.decision === 'ask'
-          ? [...s.pendingApprovals, {
-              id: `apr_demo_${seq}`,
-              tool: event.tool,
-              args: event.args,
-              riskTier: event.riskTier,
-              reversible: event.reversible,
-              createdAt: new Date(),
-              expiresAt: new Date(Date.now() + 120_000),
-            } as ApprovalRequest]
-          : s.pendingApprovals,
-      }))
-      seq++
-    }
-    setDemoRunning(false)
-  }
-
-  const handlePause = () => setSession(s => ({
-    ...s, state: s.state === 'ACTIVE' ? 'PAUSED' : 'ACTIVE',
-  }))
-
-  const handleEnd = () => {
-    setSession(s => ({ ...s, state: 'ENDED', endedAt: new Date() }))
-    setTimeout(() => navigate('/'), 2000)
-  }
-
-  const handleApprove = useCallback((aid: string) => {
-    setSession(s => ({
-      ...s,
-      pendingApprovals: s.pendingApprovals.filter(a => a.id !== aid),
-      toolCalls: s.toolCalls.map(t =>
-        t.decision === 'ask' && t.id.includes('5') ? { ...t, decision: 'allow' } : t,
-      ),
-    }))
-  }, [])
-
-  const handleDeny = useCallback((aid: string) => {
-    setSession(s => ({
-      ...s,
-      pendingApprovals: s.pendingApprovals.filter(a => a.id !== aid),
-    }))
-  }, [])
-
-  const isActive = session.state === 'ACTIVE'
-  const isPaused = session.state === 'PAUSED'
-  const isEnded = session.state === 'ENDED'
+  const Feed = (
+    <section>
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Tool calls · {s.calls.length}</h2>
+        {!ended && <Btn variant="ghost" className="min-h-9 px-2 text-xs" disabled={paused} onClick={() => store.appendDemo(s.id)}><Plus className="size-3.5" /> Next step</Btn>}
+      </div>
+      {feed.length === 0 ? <Card className="text-center text-sm text-muted-foreground">Waiting for the agent's first tool call…</Card> : (
+        <ul className="space-y-2">{feed.map((c) => <CallRow key={c.seq} c={c} onReview={() => setReview(c.seq)} />)}</ul>
+      )}
+    </section>
+  );
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden relative">
-      {/* Top bar */}
-      <div className="flex items-center gap-4 px-6 py-3 border-b border-zinc-800/60 bg-zinc-950/80 glass shrink-0">
-        {/* Back */}
-        <button onClick={() => navigate('/')} className="text-zinc-600 hover:text-zinc-400 transition-colors">
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="15 18 9 12 15 6"/>
-          </svg>
+    <div className="space-y-4">
+      <Link to="/" className="inline-flex min-h-11 items-center gap-1 text-sm text-muted-foreground"><ArrowLeft className="size-4" /> Sessions</Link>
+      <div>
+        <StateBadge s={s.state} big />
+        <h1 className="mt-2 text-xl font-bold tracking-tight">{s.title}</h1>
+        <p className="font-mono text-xs text-muted-foreground">{PROFILES[s.profile].name} · started {relativeSince(s.startedAt)} · {s.id} · sandbox: hardened container</p>
+        {s.title.startsWith("[Dry run]") && <p className="mt-1 font-mono text-xs text-ask">Dry run</p>}
+      </div>
+
+      {pending && !ended && (
+        <button onClick={() => setReview(pending.seq)} className="flex w-full items-center gap-3 rounded-xl border border-ask/50 bg-ask/10 p-3 text-left">
+          <span className="relative flex size-2.5"><span className="absolute inline-flex size-full animate-ping rounded-full bg-ask opacity-70" /><span className="relative inline-flex size-2.5 rounded-full bg-ask" /></span>
+          <span className="min-w-0 flex-1 text-sm"><strong className="text-ask">Approval needed:</strong> <span className="font-mono">{pending.tool}</span></span>
+          <span className="text-sm font-semibold text-ask">Review</span>
         </button>
+      )}
 
-        {/* Status */}
-        <div className="flex items-center gap-2">
-          <StatusDot state={session.state} />
-          <span className="text-sm font-semibold text-zinc-200">{session.state}</span>
-        </div>
-
-        <TierBadge tier={session.bandwidthTier} />
-
-        <span className="text-xs font-mono text-zinc-600 capitalize">{session.profile}</span>
-
-        {session.startedAt && (
-          <span className="text-xs font-mono text-zinc-700">
-            {formatDuration(elapsed)}
-          </span>
-        )}
-
-        <div className="flex-1" />
-
-        {/* Demo play button */}
-        {!isEnded && (
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={runDemo}
-            loading={demoRunning}
-            disabled={demoRunning}
-          >
-            {demoRunning ? 'Demo running…' : '▶ Run demo'}
-          </Button>
-        )}
-
-        {/* Controls */}
-        {!isEnded && (
-          <>
-            <Button variant="outline" size="sm" onClick={handlePause}>
-              {isPaused ? 'Resume' : 'Pause'}
-            </Button>
-            <Button variant="danger" size="sm" onClick={handleEnd}>
-              End
-            </Button>
-          </>
-        )}
-
-        {isEnded && (
-          <span className="text-xs text-zinc-500">Session ended · redirecting…</span>
-        )}
+      <div className="flex gap-1 rounded-lg border bg-surface p-1" role="radiogroup" aria-label="Bandwidth tier">
+        {TIERS.map((t) => (
+          <button key={t.id} role="radio" aria-checked={store.tier === t.id} onClick={() => store.setTier(t.id)} className={cn("flex min-h-10 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium text-muted-foreground", store.tier === t.id && "bg-accent text-foreground")}>
+            <t.icon className="size-4" /> {t.label}
+          </button>
+        ))}
       </div>
 
-      {/* Title strip */}
-      <div className="px-6 py-3 border-b border-zinc-800/40 shrink-0">
-        <p className="text-sm text-zinc-400 truncate">{session.title}</p>
+      {store.tier === "text" ? Feed : (
+        <>
+          <div className="relative aspect-video overflow-hidden rounded-xl border bg-surface scanlines">
+            <div className="absolute inset-3 rounded-md border bg-card/60 p-3 font-mono text-[10px] leading-relaxed text-muted-foreground sm:text-xs">
+              <p className="text-foreground">agent@sandbox:/workspace/api-server$</p>
+              {s.calls.slice(-4).map((c) => <p key={c.seq} className="truncate">&gt; {c.tool} {Object.values(c.args)[0]}</p>)}
+              {!paused && !ended && <p className="animate-pulse">▍</p>}
+            </div>
+            <div className="absolute left-2 top-2 flex items-center gap-1.5 rounded bg-background/80 px-2 py-0.5 font-mono text-[10px]">
+              {store.tier === "video" ? <><span className="size-1.5 rounded-full bg-block" /> LIVE · 12fps</> : <><Image className="size-3" /> every 5s</>}
+            </div>
+            {(paused || ended) && <div className="absolute inset-0 grid place-items-center bg-background/60 font-mono text-sm font-semibold">{s.state}</div>}
+          </div>
+          <Card className="py-3"><Budget {...s.budget} /></Card>
+        </>
+      )}
+
+      <div className="sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-20 grid grid-cols-3 gap-2 rounded-xl border bg-popover/95 p-2 backdrop-blur lg:bottom-4">
+        <Btn variant="secondary" disabled={ended} onClick={() => store.setState(s.id, paused ? "ACTIVE" : "PAUSED")}>{paused ? <><Play className="size-4" /> Resume</> : <><Pause className="size-4" /> Pause</>}</Btn>
+        <Btn variant="secondary" disabled={ended} onClick={() => toast("Take over requested", { description: "Handing desktop control to your device." })}><Hand className="size-4" /> Take over</Btn>
+        <Btn variant="danger" disabled={ended} onClick={() => { store.setState(s.id, "ENDED"); toast("Session ended"); }}><Power className="size-4" /> End</Btn>
       </div>
 
-      {/* Main content */}
-      <div className="flex-1 overflow-hidden flex gap-0">
+      {store.tier === "text" ? <Card className="py-3"><Budget {...s.budget} /></Card> : Feed}
+      <p className="flex items-center justify-center gap-1 text-xs text-muted-foreground"><Wifi className="size-3" /> Stream tier: {store.tier}</p>
 
-        {/* Left: live view + budget */}
-        <div className="w-[420px] shrink-0 flex flex-col border-r border-zinc-800/40 p-4 gap-4 overflow-y-auto">
-          {/* Live view toggle */}
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-500 uppercase tracking-widest">Live view</span>
-            <button
-              onClick={() => setShowLiveView(v => !v)}
-              className="text-xs text-zinc-700 hover:text-zinc-500 transition-colors"
-            >
-              {showLiveView ? 'collapse' : 'expand'}
-            </button>
-          </div>
-
-          {showLiveView && (
-            <LiveView
-              sessionId={session.id}
-              active={isActive}
-              tier={session.bandwidthTier}
-              className="h-56"
-            />
-          )}
-
-          <BudgetBar
-            used={session.budget.used}
-            total={session.budget.total}
-            costUsd={session.budget.costUsd}
-            maxCostUsd={session.budget.maxCostUsd}
-          />
-
-          {/* Quick stats */}
-          <div className="grid grid-cols-3 gap-2">
-            {[
-              { label: 'Total', value: session.toolCalls.length, color: 'text-zinc-300' },
-              { label: 'Allowed', value: session.toolCalls.filter(t => t.decision === 'allow').length, color: 'text-emerald-400' },
-              { label: 'Blocked', value: session.toolCalls.filter(t => t.decision === 'block').length, color: 'text-rose-400' },
-            ].map(stat => (
-              <div key={stat.label} className="rounded-lg bg-zinc-900 border border-zinc-800 p-2.5 text-center">
-                <p className={`text-lg font-bold font-mono ${stat.color}`}>{stat.value}</p>
-                <p className="text-[10px] text-zinc-600 mt-0.5">{stat.label}</p>
-              </div>
-            ))}
-          </div>
-
-          {/* Approval pending */}
-          {session.pendingApprovals.length > 0 && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
-              <div className="flex items-center gap-2 text-sm text-amber-400 font-medium">
-                <span className="animate-pulse">⚠</span>
-                <span>{session.pendingApprovals.length} approval pending</span>
-              </div>
-              <p className="text-xs text-amber-500/60 mt-0.5">
-                Tap to review: {session.pendingApprovals[0]?.tool}
-              </p>
-            </div>
-          )}
-
-          {/* Paused banner */}
-          {isPaused && (
-            <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-center">
-              <p className="text-sm text-amber-400 font-medium">Session paused</p>
-              <p className="text-xs text-amber-500/50 mt-0.5">Agent calls are being held</p>
-            </div>
-          )}
-
-          {/* Ended */}
-          {isEnded && (
-            <div className="rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-3 text-center space-y-1">
-              <p className="text-sm text-zinc-400 font-medium">Workspace destroyed</p>
-              <p className="text-xs text-zinc-600">Container removed · credentials revoked</p>
-              <button
-                onClick={() => navigate(`/audit?session=${session.id}`)}
-                className="text-xs text-indigo-400 hover:underline mt-1"
-              >
-                View audit receipt →
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* Right: tool call feed */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800/40 shrink-0">
-            <span className="text-xs font-medium text-zinc-500 uppercase tracking-widest">Tool-call feed</span>
-            <span className="text-xs font-mono text-zinc-700">{session.toolCalls.length} events</span>
-          </div>
-          <ToolCallFeed
-            events={session.toolCalls}
-            className="flex-1 overflow-y-auto px-4 py-3"
-          />
-        </div>
-      </div>
-
-      {/* Approval modal */}
-      {session.pendingApprovals.length > 0 && (
-        <ApprovalModal
-          approval={session.pendingApprovals[0]}
-          onApprove={handleApprove}
-          onDeny={handleDeny}
+      {reviewing && reviewing.status === "pending" && (
+        <ApprovalSheet
+          call={reviewing}
+          onClose={() => setReview(null)}
+          onDecide={(ok, expired) => {
+            store.decide(s.id, reviewing.seq, ok, expired);
+            setReview(null);
+            toast(ok ? "Approved — files.upload executed" : expired ? "Approval expired — denied" : "Denied — call not executed");
+          }}
         />
       )}
     </div>
-  )
+  );
 }
