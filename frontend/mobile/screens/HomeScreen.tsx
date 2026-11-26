@@ -1,325 +1,170 @@
-import React, { useState } from 'react'
-import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity, StatusBar,
-} from 'react-native'
+import React from 'react'
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native'
+import { Feather } from '@expo/vector-icons'
 import { SafeAreaView } from 'react-native-safe-area-context'
-import { MOCK_SESSIONS, type EnvConfig, type ChatThread, type Session } from '../lib/mock-data'
-import { T, StateChip, DecisionPill, RiskTag, PulseDot } from '../components/ui'
+import { PROFILES, type Session } from '../lib/mock'
+import { useStore } from '../lib/store'
+import { BrandHeader, Btn, Budget, C, Card, DecisionBadge, StateBadge, fmtTime } from '../components/ui'
 
-interface HomeScreenProps {
-  navigation: any
-  env: EnvConfig
-  chats: ChatThread[]
-  onOpenChat: (chatId: string | null) => void
-}
-
-export function HomeScreen({ navigation, env, chats, onOpenChat }: HomeScreenProps) {
-  const [sessions, setSessions] = useState<Session[]>(MOCK_SESSIONS)
-  const [logFilter, setLogFilter] = useState<'all' | 'allow' | 'block'>('all')
-
-  const activeSessions = sessions.filter(s => ['ACTIVE', 'PAUSED', 'STARTING'].includes(s.state))
-  const approvals = sessions.flatMap(s => s.pendingApprovals.map(a => ({ session: s, approval: a })))
-  const allLogs = sessions.flatMap(s =>
-    s.toolCalls.map(tc => ({ ...tc, sessionId: s.id, profile: s.profile }))
-  ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-
-  const visibleLogs = logFilter === 'all' ? allLogs : allLogs.filter(l => l.decision === logFilter)
-  const blockedCount = allLogs.filter(l => l.decision === 'block').length
-
-  function handleApprove(sessionId: string, approvalId: string) {
-    setSessions(prev =>
-      prev.map(s =>
-        s.id !== sessionId
-          ? s
-          : {
-              ...s,
-              pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
-              toolCalls: s.toolCalls.map(tc =>
-                tc.decision === 'ask' ? { ...tc, decision: 'allow', reason: 'Approved by user' } : tc
-              ),
-            }
-      )
-    )
-  }
-
-  function handleDeny(sessionId: string, approvalId: string) {
-    setSessions(prev =>
-      prev.map(s =>
-        s.id !== sessionId
-          ? s
-          : {
-              ...s,
-              pendingApprovals: s.pendingApprovals.filter(a => a.id !== approvalId),
-              toolCalls: s.toolCalls.map(tc =>
-                tc.decision === 'ask' ? { ...tc, decision: 'block', reason: 'Denied by user' } : tc
-              ),
-            }
-      )
-    )
-  }
+export function HomeScreen({ navigation }: { navigation: any }) {
+  const { sessions, reset } = useStore()
+  const live = sessions.filter((s) => s.state !== 'ENDED')
+  const recent = sessions.filter((s) => s.state === 'ENDED')
+  const feed = sessions
+    .flatMap((s) => s.calls.map((c) => ({ ...c, sid: s.id })))
+    .sort((a, b) => b.ts.localeCompare(a.ts))
+    .slice(0, 5)
+  const pending = sessions.reduce((n, s) => n + s.calls.filter((c) => c.status === 'pending').length, 0)
 
   return (
-    <SafeAreaView style={s.safe} edges={['top', 'left', 'right']}>
-      <StatusBar barStyle="light-content" />
-      <ScrollView contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
-        {/* Header */}
-        <View style={s.header}>
-          <View>
-            <Text style={s.heading}>Home & Activity</Text>
-            <Text style={s.sub}>Tasks, approvals & gateway audit logs</Text>
+    <SafeAreaView style={st.safe} edges={['top', 'left', 'right']}>
+      <BrandHeader onPressBrand={() => navigation.navigate('SessionsTab')} />
+      <ScrollView contentContainerStyle={st.content} showsVerticalScrollIndicator={false}>
+        <View style={st.topRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={st.h1}>Sessions</Text>
+            <Text style={st.sub}>
+              {live.length} live · {pending} awaiting your approval
+            </Text>
           </View>
-          <TouchableOpacity
-            style={s.newChatChip}
-            onPress={() => onOpenChat(null)}
-            activeOpacity={0.85}
-          >
-            <Text style={s.newChatChipText}>+ New Chat</Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* Connected Environment Card */}
-        <View style={s.envCard}>
-          <View style={s.envTop}>
-            <View style={s.envBadge}>
-              <PulseDot color={env.mode === 'desktop' ? T.green : T.indigo} size={7} />
-              <Text style={s.envBadgeText}>
-                {env.mode === 'desktop' ? 'CONNECTED TO DESKTOP' : 'VM SANDBOX READY'}
-              </Text>
+          <Btn onPress={() => navigation.navigate('NewTaskTab')}>
+            <View style={st.btnRow}>
+              <Feather name="plus" size={16} color={C.primaryFg} />
+              <Text style={st.btnPrimaryText}>New task</Text>
             </View>
-            <TouchableOpacity onPress={() => navigation.navigate('SettingsTab')}>
-              <Text style={s.switchLink}>Switch →</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={s.envHost}>
-            {env.mode === 'desktop' ? env.desktopHost : env.vmImage}
-          </Text>
-          <Text style={s.envMeta}>
-            {env.mode === 'desktop'
-              ? 'Remote Desktop bridge · Calendar, Browser & Python workspace'
-              : `${env.vmDeps.length} deps · ${env.vmMcpAgents.length} MCP agents`}
-          </Text>
+          </Btn>
         </View>
 
-        {/* Stats Strip */}
-        <View style={s.statsRow}>
-          <View style={s.statBox}>
-            <Text style={[s.statNum, { color: T.green }]}>{activeSessions.length}</Text>
-            <Text style={s.statLabel}>Running</Text>
-          </View>
-          <View style={s.statBox}>
-            <Text style={[s.statNum, { color: T.amber }]}>{approvals.length}</Text>
-            <Text style={s.statLabel}>Approvals</Text>
-          </View>
-          <View style={s.statBox}>
-            <Text style={[s.statNum, { color: T.red }]}>{blockedCount}</Text>
-            <Text style={s.statLabel}>Blocked</Text>
-          </View>
-        </View>
-
-        {/* Pending Approvals */}
-        {approvals.length > 0 && (
-          <>
-            <Text style={s.sectionLabel}>NEEDS APPROVAL</Text>
-            <View style={s.list}>
-              {approvals.map(({ session, approval }) => (
-                <View key={approval.id} style={s.approvalCard}>
-                  <View style={s.sessionTop}>
-                    <Text style={s.warnTag}>PERMISSION</Text>
-                    <RiskTag tier={approval.riskTier} />
-                  </View>
-                  <Text style={s.logTool}>{approval.tool}</Text>
-                  <Text style={s.sessionTitle}>{approval.summary || session.title}</Text>
-                  <View style={s.btnRow}>
-                    <TouchableOpacity
-                      style={s.denyBtn}
-                      onPress={() => handleDeny(session.id, approval.id)}
-                    >
-                      <Text style={s.denyText}>Block</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={s.approveBtn}
-                      onPress={() => handleApprove(session.id, approval.id)}
-                    >
-                      <Text style={s.approveText}>Allow Once</Text>
-                    </TouchableOpacity>
-                  </View>
+        {sessions.length === 0 ? (
+          <Card style={st.emptyCard}>
+            <Feather name="shield" size={40} color={C.primary} style={{ alignSelf: 'center' }} />
+            <Text style={st.emptyTitle}>No sessions yet</Text>
+            <Text style={st.emptyDesc}>
+              Start a task and the agent runs in its own hardened container. Every tool call passes the policy gateway first.
+            </Text>
+            <View style={st.emptyActions}>
+              <Btn onPress={() => navigation.navigate('NewTaskTab')}>
+                <View style={st.btnRow}>
+                  <Feather name="plus" size={15} color={C.primaryFg} />
+                  <Text style={st.btnPrimaryText}>Start a task</Text>
                 </View>
+              </Btn>
+              <Btn variant="secondary" onPress={reset}>
+                <View style={st.btnRow}>
+                  <Feather name="rotate-ccw" size={15} color={C.secondaryFg} />
+                  <Text style={st.btnSecText}>Restore sessions</Text>
+                </View>
+              </Btn>
+            </View>
+          </Card>
+        ) : (
+          <>
+            <View style={st.section}>
+              <Text style={st.sectionLabel}>ACTIVE</Text>
+              {live.map((s) => (
+                <SessionCard key={s.id} session={s} onPress={() => navigation.navigate('Session', { id: s.id })} />
               ))}
+              {live.length === 0 && <Text style={st.mutedText}>No live sessions.</Text>}
+            </View>
+
+            {recent.length > 0 && (
+              <View style={st.section}>
+                <Text style={st.sectionLabel}>RECENT</Text>
+                {recent.map((s) => (
+                  <SessionCard key={s.id} session={s} onPress={() => navigation.navigate('Session', { id: s.id })} />
+                ))}
+              </View>
+            )}
+
+            <View style={st.section}>
+              <View style={st.activityHeader}>
+                <Feather name="activity" size={13} color={C.mutedFg} />
+                <Text style={st.sectionLabel}>RECENT ACTIVITY</Text>
+              </View>
+              <Card style={{ padding: 0, overflow: 'hidden' }}>
+                {feed.map((c, idx) => (
+                  <View key={c.sid + c.seq} style={[st.feedRow, idx > 0 && st.feedBorder]}>
+                    <Text style={st.feedTool} numberOfLines={1}>
+                      {c.tool} <Text style={{ color: C.mutedFg }}>· {c.reason}</Text>
+                    </Text>
+                    <Text style={st.feedTime}>{fmtTime(c.ts)}</Text>
+                    <DecisionBadge d={c.decision} />
+                  </View>
+                ))}
+              </Card>
             </View>
           </>
         )}
-
-        {/* Running Sessions */}
-        <Text style={s.sectionLabel}>RUNNING SESSIONS</Text>
-        <View style={s.list}>
-          {MOCK_SESSIONS.map(sess => (
-            <TouchableOpacity
-              key={sess.id}
-              style={s.sessionCard}
-              onPress={() => navigation.navigate('Session', { sessionId: sess.id })}
-              activeOpacity={0.8}
-            >
-              <View style={s.sessionTop}>
-                <StateChip state={sess.state} />
-                <Text style={s.profileTag}>{sess.profile}</Text>
-                <View style={{ flex: 1 }} />
-                <Text style={s.viewLink}>Inspect →</Text>
-              </View>
-              <Text style={s.sessionTitle} numberOfLines={2}>{sess.title}</Text>
-              <Text style={s.sessionMeta}>
-                {sess.toolCalls.length} calls · ${sess.budget.costUsd.toFixed(3)}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-
-        {/* Gateway Audit Logs */}
-        <View style={s.logHeaderRow}>
-          <Text style={s.sectionLabel}>AUDIT & GATEWAY LOGS</Text>
-          <View style={s.filterChips}>
-            {(['all', 'allow', 'block'] as const).map(f => (
-              <TouchableOpacity
-                key={f}
-                style={[s.miniChip, logFilter === f && s.miniChipActive]}
-                onPress={() => setLogFilter(f)}
-              >
-                <Text style={[s.miniChipText, logFilter === f && { color: T.indigo }]}>{f}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-        <View style={s.list}>
-          {visibleLogs.slice(0, 6).map(log => (
-            <View
-              key={`${log.sessionId}_${log.id}`}
-              style={[s.logRow, log.decision === 'block' && { borderColor: T.red + '44' }]}
-            >
-              <View style={s.logTop}>
-                <Text style={s.logTool}>{log.tool}</Text>
-                <DecisionPill decision={log.decision} />
-              </View>
-              {log.reason && <Text style={s.logReason}>{log.reason}</Text>}
-              <Text style={s.logArgs} numberOfLines={1}>{JSON.stringify(log.args)}</Text>
-            </View>
-          ))}
-        </View>
-
-        {/* Recent Chats shortcut */}
-        <Text style={s.sectionLabel}>RECENT CHATS</Text>
-        <View style={s.list}>
-          {chats.slice(0, 3).map(c => (
-            <TouchableOpacity
-              key={c.id}
-              style={s.chatRow}
-              onPress={() => onOpenChat(c.id)}
-              activeOpacity={0.8}
-            >
-              <View style={{ flex: 1 }}>
-                <Text style={s.chatTitle} numberOfLines={1}>{c.title}</Text>
-                <Text style={s.chatMeta}>{c.role} · {c.messages.length} messages</Text>
-              </View>
-              <Text style={s.chevron}>›</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
       </ScrollView>
     </SafeAreaView>
   )
 }
 
-const s = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: T.bg },
-  content: { padding: 16, paddingBottom: 40 },
+function SessionCard({ session: s, onPress }: { session: Session; onPress: () => void }) {
+  const p = PROFILES[s.profile]
+  const last = s.calls[s.calls.length - 1]
+  return (
+    <TouchableOpacity activeOpacity={0.85} onPress={onPress}>
+      <Card>
+        <View style={st.cardTop}>
+          <View style={{ flex: 1 }}>
+            <StateBadge s={s.state} />
+            <Text style={st.cardTitle} numberOfLines={1}>{s.title}</Text>
+            <Text style={st.cardMeta}>
+              {p.name} profile · {s.calls.length} tool calls · {s.id}
+            </Text>
+          </View>
+          <Feather name="chevron-right" size={20} color={C.mutedFg} style={{ marginTop: 4 }} />
+        </View>
+        {last ? (
+          <Text style={st.lastCall} numberOfLines={1}>
+            last: {last.tool} → {last.decision.toUpperCase()}
+          </Text>
+        ) : null}
+        <View style={{ marginTop: 12 }}>
+          <Budget used={s.budget.used} limit={s.budget.limit} />
+        </View>
+      </Card>
+    </TouchableOpacity>
+  )
+}
 
-  header: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: 16, marginTop: 4,
-  },
-  heading: { color: T.text, fontSize: 22, fontWeight: '700', letterSpacing: -0.4 },
-  sub: { color: T.textDim, fontSize: 12, marginTop: 2 },
-  newChatChip: {
-    backgroundColor: T.indigo, paddingHorizontal: 14, paddingVertical: 8, borderRadius: 12,
-  },
-  newChatChipText: { color: '#141413', fontSize: 12, fontWeight: '700' },
+const st = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: C.background },
+  content: { padding: 16, paddingBottom: 32, gap: 20 },
+  topRow: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12 },
+  h1: { color: C.foreground, fontSize: 24, fontWeight: '700', letterSpacing: -0.4 },
+  sub: { color: C.mutedFg, fontSize: 13, marginTop: 2 },
+  btnRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  btnPrimaryText: { color: C.primaryFg, fontSize: 13, fontWeight: '700' },
+  btnSecText: { color: C.secondaryFg, fontSize: 13, fontWeight: '700' },
 
-  envCard: {
-    backgroundColor: T.surface, borderRadius: 18,
-    borderWidth: 1, borderColor: T.borderMid, padding: 15, marginBottom: 12,
-  },
-  envTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  envBadge: { flexDirection: 'row', alignItems: 'center', gap: 7 },
-  envBadgeText: { color: T.textSub, fontSize: 10, fontWeight: '700', letterSpacing: 0.8 },
-  switchLink: { color: T.indigo, fontSize: 12, fontWeight: '600' },
-  envHost: { color: T.text, fontSize: 15, fontWeight: '700', marginBottom: 3 },
-  envMeta: { color: T.textDim, fontSize: 12, lineHeight: 17 },
+  emptyCard: { paddingVertical: 32, alignItems: 'center', gap: 10 },
+  emptyTitle: { color: C.foreground, fontSize: 16, fontWeight: '700', marginTop: 6 },
+  emptyDesc: { color: C.mutedFg, fontSize: 13, textAlign: 'center', maxWidth: 280, lineHeight: 19 },
+  emptyActions: { flexDirection: 'row', gap: 10, marginTop: 10 },
 
-  statsRow: { flexDirection: 'row', gap: 10, marginBottom: 20 },
-  statBox: {
-    flex: 1, backgroundColor: T.surface, borderRadius: 14,
-    borderWidth: 1, borderColor: T.border, paddingVertical: 12, alignItems: 'center',
-  },
-  statNum: { fontSize: 20, fontWeight: '700', fontFamily: T.mono },
-  statLabel: { color: T.textDim, fontSize: 11, marginTop: 2 },
+  section: { gap: 10 },
+  sectionLabel: { color: C.mutedFg, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
+  mutedText: { color: C.mutedFg, fontSize: 13 },
 
-  sectionLabel: {
-    color: T.textDim, fontSize: 10, fontWeight: '700', letterSpacing: 1,
-    marginBottom: 10, marginTop: 2,
-  },
-  list: { gap: 10, marginBottom: 20 },
+  cardTop: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 },
+  cardTitle: { color: C.foreground, fontSize: 15, fontWeight: '700', marginTop: 8 },
+  cardMeta: { color: C.mutedFg, fontSize: 12, marginTop: 2 },
+  lastCall: { color: C.mutedFg, fontSize: 12, fontFamily: C.mono, marginTop: 10 },
 
-  approvalCard: {
-    backgroundColor: T.surface, borderRadius: 16,
-    borderWidth: 1, borderColor: T.amber + '66', padding: 14, gap: 7,
+  activityHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  feedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
   },
-  warnTag: {
-    color: T.amber, fontSize: 9, fontWeight: '800', letterSpacing: 0.6,
-    backgroundColor: T.amberDim, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 6,
-  },
-  btnRow: { flexDirection: 'row', gap: 8, marginTop: 4 },
-  denyBtn: {
-    flex: 1, backgroundColor: T.redDim, borderWidth: 1, borderColor: T.red + '44',
-    paddingVertical: 9, borderRadius: 10, alignItems: 'center',
-  },
-  denyText: { color: T.red, fontSize: 12, fontWeight: '700' },
-  approveBtn: {
-    flex: 2, backgroundColor: T.indigo, paddingVertical: 9, borderRadius: 10, alignItems: 'center',
-  },
-  approveText: { color: '#141413', fontSize: 12, fontWeight: '700' },
+  feedBorder: { borderTopWidth: 1, borderTopColor: C.border },
+  feedTool: { flex: 1, color: C.foreground, fontSize: 13, fontFamily: C.mono },
+  feedTime: { color: C.mutedFg, fontSize: 10, fontFamily: C.mono },
 
-  sessionCard: {
-    backgroundColor: T.surface, borderRadius: 16,
-    borderWidth: 1, borderColor: T.border, padding: 14, gap: 7,
-  },
-  sessionTop: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  profileTag: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-  viewLink: { color: T.indigo, fontSize: 12, fontWeight: '600' },
-  sessionTitle: { color: T.text, fontSize: 14, fontWeight: '600', lineHeight: 20 },
-  sessionMeta: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-
-  logHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  filterChips: { flexDirection: 'row', gap: 6 },
-  miniChip: {
-    paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8,
-    backgroundColor: T.surface, borderWidth: 1, borderColor: T.border,
-  },
-  miniChipActive: { borderColor: T.indigo, backgroundColor: T.indigoDim },
-  miniChipText: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-
-  logRow: {
-    backgroundColor: T.surface, borderRadius: 14,
-    borderWidth: 1, borderColor: T.border, padding: 12, gap: 4,
-  },
-  logTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  logTool: { color: T.text, fontSize: 13, fontWeight: '700', fontFamily: T.mono },
-  logReason: { color: T.red, fontSize: 11 },
-  logArgs: { color: T.textDim, fontSize: 11, fontFamily: T.mono },
-
-  chatRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    backgroundColor: T.surface, borderRadius: 14,
-    borderWidth: 1, borderColor: T.border, padding: 14,
-  },
-  chatTitle: { color: T.text, fontSize: 14, fontWeight: '600' },
-  chatMeta: { color: T.textDim, fontSize: 11, marginTop: 2 },
-  chevron: { color: T.textDim, fontSize: 18 },
+  footerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  clearLink: { color: C.mutedFg, fontSize: 12, textDecorationLine: 'underline' },
 })
