@@ -68,6 +68,10 @@ import docker.constants
 import docker.errors
 import docker.types
 from control_plane.contracts import ErrorCode, Profile
+from control_plane.sessions.docker_client import (
+    DockerClientConfigError,
+    get_default_docker_client,
+)
 from control_plane.sessions.egress_policy import EgressPolicyManager
 from control_plane.sessions.profile_loader import (
     ProfileLoader,
@@ -699,8 +703,12 @@ class SessionContainerManager:
         egress_policy_manager: EgressPolicyManager | None = None,
         subnet_pool: SubnetPool | None = None,
         proxy_container_name: str = DEFAULT_PROXY_CONTAINER_NAME,
+        docker_client_factory: object | None = None,
     ) -> None:
+        # Injected client takes priority; factory is used for lazy creation.
+        # If neither is supplied, get_default_docker_client() is used on first access.
         self._client = docker_client
+        self._docker_client_factory = docker_client_factory
         self._profiles_dir = profiles_dir
         self._profile_loader = ProfileLoader(profiles_dir=profiles_dir)
         self._egress_policy_manager = (
@@ -719,14 +727,35 @@ class SessionContainerManager:
 
     @property
     def client(self) -> docker.DockerClient:
-        """Return the underlying DockerClient, initializing from env if needed."""
-        if self._client is None:
-            try:
-                self._client = docker.from_env()
-            except Exception as exc:
-                raise DockerResourceError(
-                    f"Failed to initialize Docker client: {exc}"
-                ) from exc
+        """Return the underlying DockerClient, creating it lazily when first accessed.
+
+        Resolution order:
+        1. An explicitly injected ``docker_client`` (from constructor or test).
+        2. A ``docker_client_factory`` callable injected via the constructor.
+        3. The process-wide default via
+           :func:`~.docker_client.get_default_docker_client`,
+           which reads ``DOCKER_HOST`` / ``DOCKER_TLS_VERIFY`` / ``DOCKER_CERT_PATH``
+           and fails closed on insecure or incomplete configurations.
+
+        Never connects at import time; never falls back to an insecure endpoint.
+        """
+        if self._client is not None:
+            return self._client
+
+        try:
+            if self._docker_client_factory is not None:
+                self._client = self._docker_client_factory()  # type: ignore[operator]
+            else:
+                self._client = get_default_docker_client()
+        except DockerClientConfigError as exc:
+            raise DockerResourceError(
+                f"Failed to initialise Docker client: {exc}"
+            ) from exc
+        except Exception as exc:
+            raise DockerResourceError(
+                f"Unexpected error initialising Docker client: {exc}"
+            ) from exc
+
         return self._client
 
     @property

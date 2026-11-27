@@ -18,6 +18,9 @@ from control_plane.events.event_bus import EventBus
 from control_plane.gateway.approval_manager import ApprovalManager
 from control_plane.gateway.policy_loader import PolicyLoader
 from control_plane.sessions.container_manager import SessionContainerManager
+from control_plane.sessions.docker_client import (
+    create_docker_client,
+)
 from control_plane.sessions.profile_loader import ProfileLoader
 from control_plane.sessions.session_runner import RuntimeRegistry, SessionRunner
 from fastapi import Depends, Header
@@ -144,7 +147,7 @@ def get_policy_loader() -> PolicyLoader:
 
 @lru_cache(maxsize=1)
 def _default_container_manager() -> SessionContainerManager:
-    return SessionContainerManager()
+    return SessionContainerManager(docker_client_factory=create_docker_client)
 
 
 def get_container_manager() -> SessionContainerManager:

@@ -60,6 +60,24 @@ When running the control plane directly outside Docker, keep Uvicorn access logs
 uvicorn control_plane.api.main:app --host 0.0.0.0 --port 8000 --no-access-log
 ```
 
+### Docker Engine connection
+
+The control plane connects to a Docker daemon to create and destroy session containers.  The Docker socket (`/var/run/docker.sock`) is **never** mounted into the control-plane container or session containers.
+
+| Scenario | Configuration |
+|---|---|
+| **Host-local development** (control plane runs directly on the Docker host) | Leave all `DOCKER_*` variables unset.  The SDK uses the host socket automatically. |
+| **Containerised / remote deployment** (Compose or separate host) | Set `DOCKER_HOST`, `DOCKER_TLS_VERIFY=1`, and `DOCKER_CERT_PATH` in your `.env`.  Plain `tcp://` endpoints without TLS are rejected at startup. |
+
+```bash
+# .env — remote TLS endpoint (replace placeholders; never commit certificates)
+DOCKER_HOST=tcp://replace_with_docker_host_ip:2376
+DOCKER_TLS_VERIFY=1
+DOCKER_CERT_PATH=/path/to/docker/tls/certs
+```
+
+Mount the certificate directory into the Compose container (see commented example in `docker-compose.yml`) and ensure it contains `ca.pem`, `cert.pem`, and `key.pem`.  See `.env.example` for the full list of supported environment variables.
+
 Details and commands are finalized during Phase 1 of [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ## Status
