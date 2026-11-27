@@ -49,10 +49,16 @@ Phone app ──► Control plane ──► MCP Gateway (policy) ──► MCP s
 ## Quick start (target state)
 
 ```bash
-cp .env.example .env            # add LLM API key
-docker compose up --build       # control plane + egress proxy + base image build
-cd app && npm install && npx expo start
+cp .env.example .env            # set operator keys and LLM API key
+docker compose up --build       # control plane + egress proxy
+cd frontend/mobile && npm install && npx expo start
 ```
+
+The Compose command starts the control plane and egress proxy. The default
+Compose stack intentionally has no Docker socket or implicit Docker daemon
+connection, so session creation stays unavailable until an operator configures
+the documented remote TLS Docker connection (or runs the control plane directly
+on a dedicated Docker host). The mobile app is under `frontend/mobile`.
 
 When running the control plane directly outside Docker, keep Uvicorn access logs disabled so query-string stream/view tokens (`?token=...`) are never recorded:
 
