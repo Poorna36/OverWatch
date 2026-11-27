@@ -1,0 +1,12 @@
+name: general
+role: assistant
+system_prompt_file: prompts/assistant.md
+image: pocket/py-node:1.0
+resources: { cpus: 1.0, memory: 1g, pids: 256, ttl_minutes: 60 }
+budget: { max_tool_calls: 200, max_usd: 1.00 }
+mcp_servers:
+  files: { root: /workspace }
+  browser: {}
+  desktop: {}
+egress_allowlist: [google.com, www.google.com, bing.com, www.bing.com, duckduckgo.com, html.duckduckgo.com]
+tool_overrides: {}
