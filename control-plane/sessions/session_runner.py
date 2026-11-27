@@ -550,6 +550,27 @@ class SessionRunner:
                 self._emit_state(session_id, "FAILED", reason=reason)
         return transitioned
 
+    def _mark_paused_if_active(self, session_id: str, *, reason: str) -> bool:
+        """Atomically transition ``ACTIVE -> PAUSED`` and emit ``session_state``."""
+        now_iso = self._now_iso()
+        transitioned = False
+        with contextlib.suppress(SQLAlchemyError):
+            with self._session_factory() as db:
+                res = db.execute(
+                    update(SessionModel)
+                    .where(
+                        SessionModel.session_id == session_id,
+                        SessionModel.state == "ACTIVE",
+                    )
+                    .values(state="PAUSED", updated_at=now_iso)
+                )
+                db.commit()
+                transitioned = res.rowcount == 1
+        if transitioned:
+            with contextlib.suppress(EventBusError):
+                self._emit_state(session_id, "PAUSED", reason=reason)
+        return transitioned
+
     def _build_agent_loop(
         self,
         *,
@@ -863,9 +884,19 @@ class SessionRunner:
                     self._run_records[session_id] = record
             return record
 
-        if result.status in ("blocked", "budget_exceeded", "error"):
+        if result.status in ("blocked", "budget_exceeded", "error", "paused"):
             self._clear_session_execution_state(
                 session_id, terminal_status=result.status
+            )
+
+        if result.status == "paused":
+            self._mark_paused_if_active(
+                session_id,
+                reason=(
+                    result.error.code
+                    if result.error is not None
+                    else ErrorCode.LOOP_DETECTED.value
+                ),
             )
 
         if result.status == "error":

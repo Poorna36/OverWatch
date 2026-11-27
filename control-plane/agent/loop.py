@@ -21,6 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from control_plane.agent.failure_handler import (
+    DEFAULT_MAX_TRANSIENT_RETRIES,
+    LoopBreaker,
+    sanitize_diagnostic_text,
+)
 from control_plane.agent.llm import (
     LlmAdapter,
     LlmAdapterError,
@@ -35,6 +40,7 @@ from control_plane.contracts import (
     ErrorCode,
     Plan,
     Policy,
+    ProblemReport,
     Profile,
     SessionState,
     ToolCall,
@@ -67,6 +73,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 LoopStatus = Literal[
     "completed",
     "blocked",
+    "paused",
     "awaiting_approval",
     "budget_exceeded",
     "error",
@@ -135,6 +142,7 @@ class AgentLoopResult:
     assistant_message: str | None = None
     error: ErrorBody | None = None
     pending_approval: ApprovalRequest | None = None
+    problem_report: ProblemReport | None = None
     calls_used: int = 0
     calls_max: int = 0
     turns: int = 0
@@ -285,6 +293,7 @@ class AgentLoop:
         self._prompts_base_dir = prompts_base_dir
         self._workspace_root = workspace_root
         self._approved_plan = approved_plan
+        self._loop_breaker = LoopBreaker()
 
     def run(
         self,
@@ -678,8 +687,12 @@ class AgentLoop:
             )
         except Exception as exc:
             exec_error = ErrorBody(
-                code=ErrorCode.UPSTREAM_ERROR,
-                message=f"Tool execution failed: {exc}",
+                code=(
+                    ErrorCode.TIMEOUT
+                    if isinstance(exc, TimeoutError)
+                    else ErrorCode.UPSTREAM_ERROR
+                ),
+                message=f"Tool execution failed: {sanitize_diagnostic_text(str(exc))}",
             )
             duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
             try:
@@ -1066,7 +1079,16 @@ class AgentLoop:
         start_ns = time.monotonic_ns()
 
         def _guarded_executor(validated_args: ValidatedArguments) -> Any:
-            return executor(validated_args)
+            last_exc: Exception | None = None
+            for attempt in range(DEFAULT_MAX_TRANSIENT_RETRIES + 1):
+                try:
+                    return executor(validated_args)
+                except TimeoutError as exc:
+                    last_exc = exc
+                    if attempt >= DEFAULT_MAX_TRANSIENT_RETRIES:
+                        raise
+            assert last_exc is not None
+            raise last_exc
 
         try:
             audited: AuditedCallResult = self._coordinator.handle_call(
@@ -1092,8 +1114,12 @@ class AgentLoop:
             )
         except Exception as exc:
             exec_error = ErrorBody(
-                code=ErrorCode.UPSTREAM_ERROR,
-                message=f"Tool execution failed: {exc}",
+                code=(
+                    ErrorCode.TIMEOUT
+                    if isinstance(exc, TimeoutError)
+                    else ErrorCode.UPSTREAM_ERROR
+                ),
+                message=f"Tool execution failed: {sanitize_diagnostic_text(str(exc))}",
             )
             duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
             new_calls_used = calls_used + 1
@@ -1225,20 +1251,82 @@ class AgentLoop:
                 )
 
             # Allowed call executed via injected gateway executor
+            raw_result = audited.tool_result.result
             bounded_text = _bound_tool_result_text(
-                audited.tool_result.result,
+                raw_result,
                 self._policy.defaults.output_cap_bytes,
             )
-            _emit_event(
-                self._event_bus,
-                session_id=session_id,
-                event_type="tool_result",
-                data={
-                    "call_id": call.call_id,
-                    "ok": True,
-                    "duration_ms": duration_ms,
-                },
+            tool_failed = isinstance(raw_result, dict) and (
+                raw_result.get("ok") is False
+                or (
+                    isinstance(raw_result.get("exit_code"), int)
+                    and raw_result["exit_code"] != 0
+                )
             )
+            if tool_failed:
+                err_info = raw_result.get("error")
+                err_code = (
+                    err_info.get("code")
+                    if isinstance(err_info, dict) and err_info.get("code")
+                    else ErrorCode.UPSTREAM_ERROR
+                )
+                err_msg = (
+                    err_info.get("message")
+                    if isinstance(err_info, dict) and err_info.get("message")
+                    else f"Tool '{call.tool}' returned failure"
+                )
+                safe_msg = sanitize_diagnostic_text(str(err_msg))
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": False,
+                        "error": {"code": str(err_code), "message": safe_msg},
+                        "duration_ms": duration_ms,
+                    },
+                )
+                report = self._loop_breaker.record_failure(
+                    tool=call.tool,
+                    args_redacted=audited.preflight.args_redacted,
+                    error_code=err_code,
+                    reason=safe_msg,
+                )
+                if report is not None:
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="problem_report",
+                        data=report.model_dump(),
+                    )
+                    return AgentLoopResult(
+                        session_id=session_id,
+                        status="paused",
+                        error=ErrorBody(
+                            code=ErrorCode.LOOP_DETECTED,
+                            message=report.what_failed,
+                        ),
+                        problem_report=report,
+                        calls_used=new_calls_used,
+                        calls_max=calls_max,
+                        turns=turns,
+                        audit_seqs=tuple(audit_seqs),
+                    )
+            else:
+                self._loop_breaker.record_success(
+                    call.tool, audited.preflight.args_redacted
+                )
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": True,
+                        "duration_ms": duration_ms,
+                    },
+                )
         except (EventBusError, ApprovalManagerError) as exc:
             return AgentLoopResult(
                 session_id=session_id,

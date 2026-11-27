@@ -816,6 +816,49 @@ def edit_session_plan_route(
     return {"plan": updated.model_dump()}
 
 
+@router.post("/sessions/{session_id}/problem/{action}")
+def problem_action_route(
+    session_id: str,
+    action: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    event_bus: EventBus = Depends(get_event_bus),
+) -> dict[str, str]:
+    """Apply a user-selected F-14 problem report fix action on a paused session."""
+    allowed_actions = {"retry", "skip_step", "reconnect", "end_session", "edit_plan"}
+    if action not in allowed_actions:
+        raise ApiError(
+            400,
+            ErrorCode.ARG_INVALID,
+            f"Unsupported problem action {action!r}.",
+        )
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state != "PAUSED":
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not paused (state={row.state}).",
+        )
+    next_state = "ENDED" if action == "end_session" else "ACTIVE"
+    now_iso = format_utc_iso(datetime.now(UTC))
+    with session_factory() as db:
+        db_row = db.get(SessionModel, session_id)
+        if db_row is not None:
+            db_row.state = next_state
+            db_row.updated_at = now_iso
+            db.commit()
+    try:
+        event_bus.publish(
+            session_id=session_id,
+            event_type="session_state",
+            data={"state": next_state, "reason": f"problem_action:{action}"},
+            ts=now_iso,
+        )
+    except EventBusError:
+        pass
+    return {"state": next_state}
+
+
 @router.get("/sessions/{session_id}/screenshot")
 async def get_session_screenshot(
     session_id: str,
