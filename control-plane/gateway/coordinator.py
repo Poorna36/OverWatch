@@ -122,13 +122,13 @@ class AuditedGatewayCoordinator:
         if not callable(executor):
             raise TypeError("executor must be callable.")
 
-        preflight = self.pipeline.evaluate(
-            call,
-            profile,
-            session_state=session_state,
-            workspace_root=workspace_root,
-            approved_plan=approved_plan,
-        )
+        eval_kwargs: dict[str, Any] = {
+            "session_state": session_state,
+            "workspace_root": workspace_root,
+        }
+        if approved_plan is not None:
+            eval_kwargs["approved_plan"] = approved_plan
+        preflight = self.pipeline.evaluate(call, profile, **eval_kwargs)
         is_dry_run_write = (
             dry_run
             and preflight.decision != "block"
