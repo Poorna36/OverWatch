@@ -955,3 +955,118 @@ def test_docker_client_failure_fails_closed_then_recovers_on_retry(
             )
     finally:
         runner.shutdown(wait=True)
+
+
+def test_regression_atomic_failed_update_does_not_overwrite_concurrent_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Atomic ACTIVE->FAILED update never overwrites ENDED/PAUSED sessions."""
+    stub_docker = _build_stub_docker_client()
+    llm = _ScriptedLlm(lambda _t, _m: LlmTurnResponse(assistant_text="ok"))
+    session_factory, _, _, runner = _setup_api_harness(
+        tmp_path,
+        monkeypatch,
+        docker_factory=lambda: stub_docker,
+        llm_factory=lambda: llm,
+    )
+
+    try:
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/v1/sessions",
+                headers=_auth_headers(),
+                json={"request_text": "hello", "profile": "coding"},
+            )
+            assert resp.status_code == 200
+            sid = resp.json()["session_id"]
+            assert runner.wait_for_session(sid, timeout=3.0).status == "completed"
+
+            end_resp = client.post(
+                f"/api/v1/sessions/{sid}/end",
+                headers=_auth_headers(),
+            )
+            assert end_resp.status_code == 200
+
+            # Even if a racing worker attempts to mark FAILED after ENDED,
+            # the conditional UPDATE WHERE state='ACTIVE' is a safe no-op.
+            assert (
+                runner._mark_failed_if_active(sid, reason="late worker error") is False
+            )
+            with session_factory() as db:
+                row = db.get(SessionModel, sid)
+                assert row is not None and row.state == "ENDED"
+    finally:
+        runner.shutdown(wait=True)
+
+
+def test_regression_post_end_approval_listing_does_not_clobber_run_record_with_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expiring approvals via GET /approvals after /end does not set FATAL."""
+    stub_docker = _build_stub_docker_client()
+    clock_state = {"now": datetime(2026, 11, 27, 10, 0, 0, tzinfo=UTC)}
+    llm = _ScriptedLlm(
+        lambda _t, _m: LlmTurnResponse(
+            tool_calls=(
+                LlmToolCall(
+                    call_id="c_ask",
+                    tool="files.delete",
+                    args={"path": "temp.txt"},
+                ),
+            )
+        )
+    )
+    session_factory, _, _, runner = _setup_api_harness(
+        tmp_path,
+        monkeypatch,
+        docker_factory=lambda: stub_docker,
+        llm_factory=lambda: llm,
+        clock=lambda: clock_state["now"],
+    )
+
+    try:
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/v1/sessions",
+                headers=_auth_headers(),
+                json={"request_text": "delete temp.txt", "profile": "coding"},
+            )
+            assert resp.status_code == 200
+            sid = resp.json()["session_id"]
+            _wait_until(
+                lambda: (
+                    (rec := runner.get_run_record(sid)) is not None
+                    and rec.status == "awaiting_approval"
+                )
+            )
+            aid = runner.get_run_record(sid).pending_approval_id
+            assert aid is not None
+
+            end_resp = client.post(
+                f"/api/v1/sessions/{sid}/end",
+                headers=_auth_headers(),
+            )
+            assert end_resp.status_code == 200
+            assert end_resp.json() == {"state": "ENDED"}
+
+            # Advance clock past approval_timeout_s and poll GET /approvals.
+            clock_state["now"] = clock_state["now"] + timedelta(seconds=300)
+            list_resp = client.get(
+                f"/api/v1/sessions/{sid}/approvals?pending=true",
+                headers=_auth_headers(),
+            )
+            assert list_resp.status_code == 200
+            assert list_resp.json() == {"approvals": []}
+
+            with session_factory() as db:
+                approval_row = db.get(ApprovalModel, aid)
+                assert approval_row is not None and approval_row.status == "timed_out"
+
+            rec_after = runner.get_run_record(sid)
+            assert rec_after is not None
+            assert rec_after.status == "awaiting_approval"
+            assert rec_after.error_code is None
+    finally:
+        runner.shutdown(wait=True)

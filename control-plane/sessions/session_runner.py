@@ -74,6 +74,7 @@ from control_plane.sessions.container_manager import (
     validate_session_id,
 )
 from control_plane.sessions.profile_loader import ProfileLoader, ProfileLoaderError
+from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -481,6 +482,27 @@ class SessionRunner:
                 return None
             return row.state  # type: ignore[return-value]
 
+    def _mark_failed_if_active(self, session_id: str, *, reason: str) -> bool:
+        """Atomically transition ``ACTIVE -> FAILED`` and emit ``session_state``."""
+        now_iso = self._now_iso()
+        transitioned = False
+        with contextlib.suppress(SQLAlchemyError):
+            with self._session_factory() as db:
+                res = db.execute(
+                    update(SessionModel)
+                    .where(
+                        SessionModel.session_id == session_id,
+                        SessionModel.state == "ACTIVE",
+                    )
+                    .values(state="FAILED", updated_at=now_iso)
+                )
+                db.commit()
+                transitioned = res.rowcount == 1
+        if transitioned:
+            with contextlib.suppress(EventBusError):
+                self._emit_state(session_id, "FAILED", reason=reason)
+        return transitioned
+
     def _build_agent_loop(
         self,
         *,
@@ -709,21 +731,12 @@ class SessionRunner:
         if result.status == "error":
             # Mark FAILED only on fatal/upstream loop failures while avoiding
             # leaking request_text in session_state reasons.
-            current_state = self._get_session_state(session_id)
-            if current_state == "ACTIVE":
-                with contextlib.suppress(SQLAlchemyError, SessionStartupError):
-                    self._update_session_row(session_id, state="FAILED")
-                with contextlib.suppress(EventBusError):
-                    err_code = (
-                        result.error.code
-                        if result.error is not None
-                        else ErrorCode.FATAL
-                    )
-                    self._emit_state(
-                        session_id,
-                        "FAILED",
-                        reason=f"agent stopped with {err_code}",
-                    )
+            err_code = (
+                result.error.code if result.error is not None else ErrorCode.FATAL
+            )
+            self._mark_failed_if_active(
+                session_id, reason=f"agent stopped with {err_code}"
+            )
 
         record = SessionRunRecord(
             session_id=session_id,
@@ -792,15 +805,10 @@ class SessionRunner:
                 )
             except Exception as exc:
                 self._clear_session_execution_state(session_id, terminal_status="error")
-                if self._get_session_state(session_id) == "ACTIVE":
-                    with contextlib.suppress(SQLAlchemyError, SessionStartupError):
-                        self._update_session_row(session_id, state="FAILED")
-                    with contextlib.suppress(EventBusError):
-                        self._emit_state(
-                            session_id,
-                            "FAILED",
-                            reason=f"agent execution failed ({type(exc).__name__})",
-                        )
+                self._mark_failed_if_active(
+                    session_id,
+                    reason=f"agent execution failed ({type(exc).__name__})",
+                )
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -893,15 +901,10 @@ class SessionRunner:
                 )
             except Exception as exc:
                 self._clear_session_execution_state(session_id, terminal_status="error")
-                if self._get_session_state(session_id) == "ACTIVE":
-                    with contextlib.suppress(SQLAlchemyError, SessionStartupError):
-                        self._update_session_row(session_id, state="FAILED")
-                    with contextlib.suppress(EventBusError):
-                        self._emit_state(
-                            session_id,
-                            "FAILED",
-                            reason=f"agent continuation failed ({type(exc).__name__})",
-                        )
+                self._mark_failed_if_active(
+                    session_id,
+                    reason=f"agent continuation failed ({type(exc).__name__})",
+                )
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -977,15 +980,10 @@ class SessionRunner:
                 )
             except Exception as exc:
                 self._clear_session_execution_state(session_id, terminal_status="error")
-                if self._get_session_state(session_id) == "ACTIVE":
-                    with contextlib.suppress(SQLAlchemyError, SessionStartupError):
-                        self._update_session_row(session_id, state="FAILED")
-                    with contextlib.suppress(EventBusError):
-                        self._emit_state(
-                            session_id,
-                            "FAILED",
-                            reason=f"agent message failed ({type(exc).__name__})",
-                        )
+                self._mark_failed_if_active(
+                    session_id,
+                    reason=f"agent message failed ({type(exc).__name__})",
+                )
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -1102,17 +1100,32 @@ class SessionRunner:
 
             entry = self._registry.pending_approvals.pop(resolution.approval_id, None)
             if entry is None:
+                missing_entry = True
+            else:
+                missing_entry = False
+
+        if missing_entry:
+            current_state = self._get_session_state(resolution.session_id)
+            if current_state not in ("ENDING", "ENDED", "FAILED"):
                 self._clear_session_execution_state(
                     resolution.session_id, terminal_status="error"
                 )
-                self._run_records[resolution.session_id] = SessionRunRecord(
-                    session_id=resolution.session_id,
-                    status="error",
-                    error_code=ErrorCode.FATAL.value,
-                    error_message=(
-                        "Missing in-memory continuation state for approval resumption."
-                    ),
-                )
+                with self._lock:
+                    self._run_records[resolution.session_id] = SessionRunRecord(
+                        session_id=resolution.session_id,
+                        status="error",
+                        error_code=ErrorCode.FATAL.value,
+                        error_message=(
+                            "Missing in-memory continuation state for "
+                            "approval resumption."
+                        ),
+                    )
+            return None
+
+        with self._lock:
+            if self._registry.is_shutdown:
+                if entry.timer is not None:
+                    entry.timer.cancel()
                 return None
 
             timer_to_cancel = entry.timer

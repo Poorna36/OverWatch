@@ -92,7 +92,7 @@ def list_session_approvals(
     session_runner: SessionRunner = Depends(get_session_runner),
 ) -> dict[str, list[dict[str, Any]]]:
     """List approvals for an owned session, expiring any due approvals first."""
-    _require_owned_session(session_factory, session_id, owner_id)
+    session_state = _require_owned_session(session_factory, session_id, owner_id)
 
     try:
         expired = approval_manager.expire_due(session_id=session_id)
@@ -105,11 +105,12 @@ def list_session_approvals(
     except ApprovalManagerError as exc:
         raise ApiError(500, ErrorCode.UPSTREAM_ERROR, str(exc)) from exc
 
-    for resolved in expired:
-        try:
-            session_runner.on_approval_resolved(resolved)
-        except SessionRunnerError:
-            pass
+    if session_state not in ("ENDING", "ENDED", "FAILED"):
+        for resolved in expired:
+            try:
+                session_runner.on_approval_resolved(resolved)
+            except SessionRunnerError:
+                pass
 
     with session_factory() as db:
         stmt = (
