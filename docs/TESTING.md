@@ -43,7 +43,7 @@ Run inside a live session container and assert:
 | B10 | huge output (`yes | head -c 50M`) | truncated at output cap |
 | B11 | long-running command | `TIMEOUT` at limit |
 | B12 | call while paused/ended | `SESSION_INACTIVE` |
-| B13 | access another session's WS/view URL | rejected |
+| B13 | access another session's WS/view URL, or open the view WS from a foreign/missing Origin | rejected |
 | B14 | `files.upload` | `ask`; deny → `USER_DENIED`; no answer → `APPROVAL_TIMEOUT` |
 | B15 | tamper with an audit row | `verify_audit` reports broken chain |
 | B16 | attempt direct MCP server connection from the agent process | not reachable (only the gateway holds connections) |
@@ -54,7 +54,7 @@ DEMO (F-18): `gmail.send` from the agent is rejected; only the user-originated e
 
 - Create session → ACTIVE → run scripted task (write file, run script, read output) → END; verify audit entries and receipt.
 - Teardown (F-08): after `ENDED`, assert no container, volume, network, or vault credentials for the session.
-- Live view: view URL reachable with a valid token, rejected without.
+- Live view: load the trusted KasmVNC assets through the view URL, exchange its token for the scoped cookie, open the authenticated WebSocket from the configured Origin, and verify an RFB update/frame. Reject missing/foreign Origin, invalid tokens, and cross-session access; confirm bridge cleanup on disconnect.
 - Reconnect: drop WS mid-task; reconnect with `last_seq`; all missed events delivered.
 - STRETCH: dry-run changes nothing and Apply matches the diff; undo restores a previous file; plan escalation for off-plan calls; problem report after repeated failure.
 

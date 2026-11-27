@@ -81,7 +81,7 @@ def read_api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_stream_clock] = lambda: (lambda: BASE_NOW)
 
     try:
-        client = TestClient(app)
+        client = TestClient(app, base_url="https://overwatch.example.com:8443")
         yield {
             "client": client,
             "factory": factory,
@@ -681,6 +681,7 @@ def test_live_view_entry_assets_and_websockify_isolation(
     )
     set_cookie = entry.headers["set-cookie"]
     assert "HttpOnly" in set_cookie
+    assert "secure" in set_cookie.lower()
     assert (
         "SameSite=strict" in set_cookie.lower()
         or "samesite=strict" in set_cookie.lower()
@@ -703,14 +704,34 @@ def test_live_view_entry_assets_and_websockify_isolation(
     assert cross_asset.status_code == 401
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect(
-            f"/api/v1/sessions/{SESSION_OTHER}/view/websockify?token={valid_tok}"
+            f"/api/v1/sessions/{SESSION_OTHER}/view/websockify?token={valid_tok}",
+            headers={"Origin": "https://overwatch.example.com:8443"},
         ):
             pass
     assert exc_info.value.code == 1008
 
     # Valid WS connection relays frames and closes bridge on exit
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify",
+            headers={"Origin": "https://attacker.example"},
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify"
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
     with client.websocket_connect(
         f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify",
+        headers={
+            "Origin": "https://overwatch.example.com:8443",
+            "Cookie": f"overwatch_view={client.cookies.get('overwatch_view')}",
+        },
         subprotocols=["binary"],
     ) as ws:
         assert ws.receive_bytes() == b"RFB 003.008\n"

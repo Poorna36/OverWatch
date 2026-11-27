@@ -31,6 +31,7 @@ from control_plane.events.event_bus import EventBus
 from control_plane.gateway.approval_manager import ApprovalManager
 from control_plane.gateway.coordinator import AuditedGatewayCoordinator
 from control_plane.gateway.mcp_runtime import (
+    MAX_VIEW_WS_FRAME_BYTES,
     MCP_SERVER_COMMANDS,
     ContainerPathJail,
     McpContainerError,
@@ -39,6 +40,7 @@ from control_plane.gateway.mcp_runtime import (
     McpTransportError,
     McpUnsupportedServerError,
     SessionMcpRuntime,
+    ViewWebSocketBridge,
     encode_docker_frame,
 )
 from control_plane.gateway.pipeline import GatewayPreflightPipeline
@@ -960,3 +962,18 @@ def test_read_view_asset_and_ws_bridge_lifecycle() -> None:
     assert struct.calcsize(">B3xI") == 8
     with pytest.raises(McpRuntimeClosedError):
         rt.read_view_asset("vnc.html")
+
+
+def test_view_ws_bridge_rejects_oversized_upstream_frame() -> None:
+    client_sock, server_sock = socket.socketpair()
+    bridge = ViewWebSocketBridge(sock=client_sock)
+    try:
+        oversized_header = b"\x82\x7f" + (MAX_VIEW_WS_FRAME_BYTES + 1).to_bytes(
+            8, "big"
+        )
+        server_sock.sendall(encode_docker_frame(1, oversized_header))
+        with pytest.raises(McpTransportError, match="exceeds size limit"):
+            bridge.recv_frame()
+    finally:
+        bridge.close()
+        server_sock.close()
