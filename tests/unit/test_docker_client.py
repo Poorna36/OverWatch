@@ -445,15 +445,15 @@ def _parse_compose_env(env_entries: list[str] | dict[str, str]) -> dict[str, str
     return parsed
 
 
-def test_compose_never_mounts_docker_socket_and_enforces_tls():
-    """docker-compose.yml avoids docker.sock and wires verified TLS + RO cert mount."""
+def test_default_compose_has_no_socket_implicit_host_or_tls_mounts():
+    """Default docker-compose.yml has no docker.sock, DOCKER_HOST, or TLS cert mount."""
     compose_path = REPO_ROOT / "docker-compose.yml"
     raw_text = compose_path.read_text(encoding="utf-8")
     compose_data = yaml.safe_load(raw_text)
 
-    # No PEM certificates or private keys committed in Compose
     assert "BEGIN CERTIFICATE" not in raw_text
     assert "PRIVATE KEY" not in raw_text
+    assert "host.docker.internal" not in raw_text
 
     services = compose_data["services"]
     for svc_name, svc in services.items():
@@ -461,14 +461,36 @@ def test_compose_never_mounts_docker_socket_and_enforces_tls():
             assert "docker.sock" not in str(
                 vol
             ), f"Service {svc_name!r} must not mount docker.sock"
+            assert "docker-tls" not in str(
+                vol
+            ), f"Default service {svc_name!r} must not mount TLS certs"
 
     cp = services["control-plane"]
     env = _parse_compose_env(cp["environment"])
+    for forbidden_var in ("DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"):
+        assert (
+            forbidden_var not in env
+        ), f"Default docker-compose.yml must not set {forbidden_var}"
+
+
+def test_tls_compose_override_requires_explicit_endpoint_and_certs():
+    """docker-compose.tls.yml opts into verified TLS and requires operator vars."""
+    override_path = REPO_ROOT / "docker-compose.tls.yml"
+    raw_text = override_path.read_text(encoding="utf-8")
+    override_data = yaml.safe_load(raw_text)
+
+    assert "BEGIN CERTIFICATE" not in raw_text
+    assert "PRIVATE KEY" not in raw_text
+    assert "host.docker.internal" not in raw_text
+    assert "docker.sock" not in raw_text
+
+    cp = override_data["services"]["control-plane"]
+    env = _parse_compose_env(cp["environment"])
 
     assert env["DOCKER_TLS_VERIFY"] == "1"
-    assert "tcp://" in env["DOCKER_HOST"]
+    assert env["DOCKER_HOST"].startswith("${DOCKER_HOST:?")
     cert_path = env["DOCKER_CERT_PATH"]
-    assert cert_path.startswith("/")
+    assert cert_path == "/etc/overwatch/docker-tls"
 
     cert_mounts = [
         str(vol).rsplit(":", 2)
@@ -476,6 +498,7 @@ def test_compose_never_mounts_docker_socket_and_enforces_tls():
         if len(str(vol).rsplit(":", 2)) == 3 and str(vol).rsplit(":", 2)[1] == cert_path
     ]
     assert len(cert_mounts) == 1
+    assert cert_mounts[0][0].startswith("${DOCKER_TLS_CERT_DIR:?")
     assert cert_mounts[0][2] == "ro"
 
 
@@ -485,6 +508,8 @@ def test_env_example_documents_docker_placeholders_only():
 
     assert "BEGIN CERTIFICATE" not in env_text
     assert "PRIVATE KEY" not in env_text
+    assert "host.docker.internal" not in env_text
+    assert "docker-compose.tls.yml" in env_text
 
     for var in (
         "DOCKER_HOST",
@@ -505,14 +530,16 @@ def test_env_example_documents_docker_placeholders_only():
 
 
 def test_readme_documents_tls_placement_permissions_startup_and_scope():
-    """README documents cert placement, permissions, startup, and TLS scope limits."""
+    """README documents opt-in TLS override, cert permissions, and authority limits."""
     readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "BEGIN CERTIFICATE" not in readme_text
     assert "PRIVATE KEY" not in readme_text
+    assert "host.docker.internal" not in readme_text
 
     for expected in (
         "/var/run/docker.sock",
+        "docker-compose.tls.yml",
         "ca.pem",
         "cert.pem",
         "key.pem",
@@ -523,6 +550,8 @@ def test_readme_documents_tls_placement_permissions_startup_and_scope():
         "DOCKER_TLS_CERT_DIR",
         "docker compose up",
         "does not restrict Docker API permissions",
+        "dedicated isolated Docker host",
+        "authorization layer",
     ):
         assert expected in readme_text
 

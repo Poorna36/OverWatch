@@ -67,7 +67,8 @@ The control plane connects to a Docker daemon to create and destroy session cont
 | Scenario | Configuration |
 |---|---|
 | **Host-local development** (`uvicorn` on the Docker host) | Leave all `DOCKER_*` variables unset. The Docker SDK uses the host's normal local socket configuration automatically. |
-| **Containerised Compose / remote deployment** | `docker-compose.yml` pins `DOCKER_TLS_VERIFY=1`, mounts the host certificate directory read-only at `/etc/overwatch/docker-tls`, and sets `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`. Plain `tcp://` endpoints and incomplete certificate sets fail closed. |
+| **Default `docker-compose.yml`** | Starts `control-plane` and `egress-proxy` with **no** `/var/run/docker.sock` mount, **no** implicit `DOCKER_HOST`, and **no** TLS certificate mount. Session creation fails closed until a remote TLS endpoint is explicitly configured. |
+| **Opt-in Compose remote TLS** (`docker-compose.tls.yml`) | Adds verified mutual TLS (`DOCKER_TLS_VERIFY=1`, `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`) and requires the operator to supply `DOCKER_HOST` and `DOCKER_TLS_CERT_DIR`. Fails closed if either variable is unset, if `tcp://` lacks TLS, or if any certificate file is missing. |
 
 #### Remote Docker TLS setup for Compose
 
@@ -82,28 +83,33 @@ The control plane connects to a Docker daemon to create and destroy session cont
    sudo chmod 0400 /etc/overwatch/docker-tls/key.pem
    ```
 
-   `docker-compose.yml` mounts `${DOCKER_TLS_CERT_DIR:-/etc/overwatch/docker-tls}` read-only (`:ro`) into `/etc/overwatch/docker-tls` inside `control-plane`, matching `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`.
+   `docker-compose.tls.yml` mounts `${DOCKER_TLS_CERT_DIR}` read-only (`:ro`) into `/etc/overwatch/docker-tls` inside `control-plane`, matching `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`.
 
 2. **Environment configuration**
 
-   Copy `.env.example` to `.env` and set your secrets plus the Docker TLS settings (use placeholders until replaced on the target host):
+   Copy `.env.example` to `.env` and set your secrets plus the required Docker TLS settings (use placeholders until replaced on the target host; there is no default endpoint):
 
    ```bash
-   # .env — remote TLS endpoint for Compose (replace placeholders; never commit certs)
+   # .env — remote TLS endpoint for docker-compose.tls.yml (replace placeholders; never commit certs)
    DOCKER_HOST=tcp://replace-with-docker-host:2376
    DOCKER_TLS_CERT_DIR=/path/to/docker/tls/certs
    ```
 
-   (`DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/etc/overwatch/docker-tls` are already enforced by `docker-compose.yml`. If you run `uvicorn` directly on a host against a remote TLS daemon instead of Compose, also set `DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/path/to/docker/tls/certs`.)
+   (`DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/etc/overwatch/docker-tls` are already pinned by `docker-compose.tls.yml`. If you run `uvicorn` directly on a host against a remote TLS daemon instead of Compose, also set `DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/path/to/docker/tls/certs`.)
 
 3. **Validate and start the service**
 
    ```bash
-   docker compose config          # verify rendered Compose configuration
-   docker compose up -d --build   # start control-plane + egress-proxy
+   # Default Compose (no Docker socket, no implicit DOCKER_HOST, no TLS cert mount):
+   docker compose config
+   docker compose up -d --build
+
+   # Opt-in remote TLS Compose deployment (requires DOCKER_HOST and DOCKER_TLS_CERT_DIR):
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml config
+   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
    ```
 
-> **Security note on TLS scope:** Mutual TLS authenticates the client and daemon and encrypts traffic in transit, **but it does not restrict Docker API permissions**. Any client holding a valid certificate can exercise whatever Docker Engine API capabilities the remote daemon exposes. Restrict access to the remote Docker daemon (e.g. dedicated host/network isolation or an external authorization layer) to trusted control-plane use only.
+> **Security note on TLS scope and daemon authority:** Mutual TLS authenticates the client and daemon and encrypts traffic in transit, **but it does not restrict Docker API permissions or provide least privilege**. A mutual-TLS Docker client certificate can grant broad (effectively root-equivalent) daemon authority over the target Docker Engine. Because this repository does not bundle or enforce a Docker authorization proxy, operators **must** use a dedicated isolated Docker host for OverWatch session containers or deploy a suitable external authorization layer in front of the remote daemon.
 
 See `.env.example` for the full list of supported environment variables.
 

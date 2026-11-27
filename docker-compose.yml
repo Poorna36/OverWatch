@@ -15,23 +15,15 @@ services:
       - OVERWATCH_SQUID_ACL_PATH=/app/squid-config/sessions.conf
       - HTTP_PROXY=http://egress-proxy:3128
       - HTTPS_PROXY=http://egress-proxy:3128
-      # Docker Engine connection for session container management.
-      # The host Docker socket (/var/run/docker.sock) is intentionally NEVER mounted.
-      # Compose deployments connect to a remote/host Docker Engine over verified TLS:
-      #   - DOCKER_HOST defaults to a TLS endpoint (set tcp://<host>:2376 in .env)
-      #   - DOCKER_TLS_VERIFY is pinned to 1 (verification cannot be disabled)
-      #   - DOCKER_CERT_PATH matches the read-only mount target below
-      # Place ca.pem, cert.pem, and key.pem in DOCKER_TLS_CERT_DIR on the host.
-      # Note: TLS authenticates and encrypts the connection but does not restrict
-      # Docker API permissions; restrict the daemon to trusted control-plane use.
-      - DOCKER_HOST=${DOCKER_HOST:-tcp://host.docker.internal:2376}
-      - DOCKER_TLS_VERIFY=1
-      - DOCKER_CERT_PATH=/etc/overwatch/docker-tls
+      # Docker Engine connection for session container management:
+      # - The host Docker socket (/var/run/docker.sock) is NEVER mounted.
+      # - No implicit DOCKER_HOST or TLS certificate mount is configured here.
+      # - To enable remote Docker Engine access over verified mutual TLS, opt in
+      #   with the override file:
+      #     docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
     volumes:
       - overwatch-data:/app/data
       - squid-config:/app/squid-config
-      # Read-only mount of host-provided Docker TLS certificates (ca.pem, cert.pem, key.pem)
-      - ${DOCKER_TLS_CERT_DIR:-/etc/overwatch/docker-tls}:/etc/overwatch/docker-tls:ro
     networks:
       - mgmt
     depends_on:
