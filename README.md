@@ -54,6 +54,12 @@ docker compose up --build       # control plane + egress proxy + base image buil
 cd app && npm install && npx expo start
 ```
 
+When running the control plane directly outside Docker, keep Uvicorn access logs disabled so query-string stream/view tokens (`?token=...`) are never recorded:
+
+```bash
+uvicorn control_plane.api.main:app --host 0.0.0.0 --port 8000 --no-access-log
+```
+
 Details and commands are finalized during Phase 1 of [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
 ## Status

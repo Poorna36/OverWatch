@@ -68,6 +68,7 @@ Implement via Docker SDK with equivalent options. Additional rules:
 
 - App ↔ API: static bearer token (demo). Rotate by changing `.env`.
 - WS and live-view: session-scoped tokens, 15-minute expiry, refreshable while the session is active.
+- Run the control-plane Uvicorn server with `--no-access-log` so query-string `?token=...` credentials on WS/view handshakes are never written to server access logs (preserving application error logs).
 - Reject any request for a session not owned by the caller.
 
 ## 7. Basic MCP-level defences (per server)

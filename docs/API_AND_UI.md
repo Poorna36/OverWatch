@@ -17,7 +17,7 @@ Base path: `/api/v1`. JSON in/out. Errors: `{ "error": ErrorBody }`.
 | Method | Path | Body | Returns | Feature |
 |---|---|---|---|---|
 | POST | `/sessions` | `{request_text: string, profile?: string, dry_run?: boolean}` | `{session_id, state, plan?}` | F-01 |
-| GET | `/sessions` | | `{sessions: SessionSummary[]}` | F-05 |
+| GET | `/sessions` | | `{sessions: SessionSummary[]}` (ordered newest first) | F-05 |
 | GET | `/sessions/{id}` | | `{session_id, state, profile, created_at, stream_url?, view_url?}` | F-05 |
 | POST | `/sessions/{id}/pause` | | `{state}` | F-05 |
 | POST | `/sessions/{id}/resume` | | `{state}` | F-05 |
@@ -71,7 +71,7 @@ Base path: `/api/v1`. JSON in/out. Errors: `{ "error": ErrorBody }`.
 
 ## 3. WebSocket
 
-`GET /api/v1/sessions/{id}/stream?token=...` upgrades to WS.
+`GET /api/v1/sessions/{id}/stream?token=...` upgrades to WS. `GET /api/v1/sessions/{id}` builds `stream_url` from the configured `PUBLIC_BASE_URL` (converting `http`/`https` to `ws`/`wss`) with a short-lived stream token while the session is active.
 
 - Client first sends `{"type":"hello","last_seq":N}`; server replays events with `seq > N`, then streams live.
 - Server frames are `EventEnvelope` (see `CONTRACTS.md` section 9).
