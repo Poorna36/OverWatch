@@ -3,11 +3,11 @@
 Do phases in order. Each task should be one small PR with tests. Never cut Phases 1 to 4. Check boxes as you go.
 
 ## Phase 0: Scaffold
-- [ ] Repo layout from `AGENTS.md`; `pyproject.toml`, `ruff`, `black`, `pytest`
-- [ ] `docker-compose.yml` (control plane, egress proxy), `.env.example`
-- [ ] Pydantic models mirroring `CONTRACTS.md` in `control-plane/contracts.py`
-- [ ] Expo app skeleton with `contracts.ts`
-- [ ] SQLite + Alembic initial migration from `DB.md`
+- [x] Repo layout from `AGENTS.md`; `pyproject.toml`, `ruff`, `black`, `pytest`
+- [x] `docker-compose.yml` (control plane, egress proxy), `.env.example`
+- [x] Pydantic models mirroring `CONTRACTS.md` in `control-plane/contracts.py`
+- [x] Expo app skeleton with `contracts.ts`
+- [x] SQLite + Alembic initial migration from `DB.md`
 - **Done when:** `docker compose up` runs a health endpoint; `pytest` runs with a trivial test.
 
 ## Phase 1: Sandbox (F-01, F-08, F-09)

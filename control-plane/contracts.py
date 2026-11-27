@@ -32,6 +32,15 @@ SessionState = Literal[
 ]
 
 
+class SessionSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: Id
+    state: SessionState
+    profile: str
+    created_at: Iso
+
+
 # ---------------------------------------------------------------------------
 # Section 2. Error codes
 # ---------------------------------------------------------------------------
@@ -279,7 +288,12 @@ class ProblemReport(BaseModel):
 # Section 11. Audit entry
 # ---------------------------------------------------------------------------
 AuditDecision = Literal[
-    "allowed", "asked_approved", "asked_denied", "blocked", "dry_run"
+    "allowed",
+    "asked",
+    "asked_approved",
+    "asked_denied",
+    "blocked",
+    "dry_run",
 ]
 
 

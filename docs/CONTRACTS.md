@@ -12,6 +12,13 @@ type Tier = "read" | "reversible" | "sensitive" | "forbidden";
 type SessionState =
   "CREATED" | "PLANNING" | "AWAITING_PLAN_APPROVAL" | "STARTING" |
   "ACTIVE" | "PAUSED" | "ENDING" | "ENDED" | "FAILED";
+
+interface SessionSummary {
+  session_id: Id;
+  state: SessionState;
+  profile: string;
+  created_at: Iso;
+}
 ```
 
 ## 2. Error codes
@@ -221,7 +228,13 @@ interface AuditEntry {
   ts: Iso;
   tool: string;
   args_redacted: Record<string, unknown>;
-  decision: "allowed"|"asked_approved"|"asked_denied"|"blocked"|"dry_run";
+  decision:
+    | "allowed"
+    | "asked"
+    | "asked_approved"
+    | "asked_denied"
+    | "blocked"
+    | "dry_run";
   reason: string;                   // error code or short text
   tier: Tier | null;
   undo_id?: Id;
@@ -230,6 +243,9 @@ interface AuditEntry {
   hash: string;                     // sha256(prev_hash + canonical_json(entry without hash))
 }
 ```
+
+- `"asked"`: gateway preflight decision awaiting human approval resolution.
+- `"asked_approved"` / `"asked_denied"`: resolved approval outcomes recorded after human decision.
 
 Redaction rules: never log secrets, tokens or full file/email bodies; truncate long strings to 200 chars.
 

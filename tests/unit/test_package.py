@@ -11,6 +11,7 @@ def test_package_imports():
         "control_plane.api.main",
         "control_plane.contracts",
         "control_plane.agent",
+        "control_plane.db",
         "control_plane.gateway",
         "control_plane.sessions",
         "control_plane.vault",
