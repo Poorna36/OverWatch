@@ -465,3 +465,68 @@ def test_gateway_pipeline_latency_benchmark(tmp_path: Path) -> None:
     assert p95 < 2.0, f"p95 latency {p95:.4f}ms exceeded 2.0ms limit"
     # Ensure stats are non-trivial
     assert mean > 0.0
+
+
+def test_gateway_coordinator_latency_benchmark(tmp_path: Path) -> None:
+    """Benchmark full audited coordinator latency over 500 iterations.
+
+    Measures preflight + persistent SQLite audit write; asserts median latency
+    p50 < 5.0 ms and p95 < 10.0 ms.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "safe.txt").write_text("benchmark content", encoding="utf-8")
+
+    db_path = tmp_path / "bench_coordinator.db"
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    init_db(engine)
+    factory = create_session_factory(engine)
+    with factory() as db:
+        db.add(
+            SessionModel(
+                session_id=SESSION_ID,
+                state="ACTIVE",
+                profile="coding",
+                owner_id="bench-owner",
+                created_at="2026-11-28T00:00:00Z",
+                updated_at="2026-11-28T00:00:00Z",
+            )
+        )
+        db.commit()
+
+    writer = AuditWriter(factory)
+    pipeline = GatewayPreflightPipeline(load_policy(), workspace_root=workspace)
+    coordinator = AuditedGatewayCoordinator(pipeline=pipeline, audit_writer=writer)
+    profile = load_profile("coding")
+    call = _call("files.read", {"path": "safe.txt"})
+
+    for _ in range(50):
+        coordinator.handle_call(
+            call,
+            profile,
+            executor=lambda c: {"content": "ok"},
+            session_state="ACTIVE",
+        )
+
+    latencies_ms: list[float] = []
+    for _ in range(500):
+        t0 = time.perf_counter_ns()
+        coordinator.handle_call(
+            call,
+            profile,
+            executor=lambda c: {"content": "ok"},
+            session_state="ACTIVE",
+        )
+        t1 = time.perf_counter_ns()
+        latencies_ms.append((t1 - t0) / 1_000_000.0)
+
+    engine.dispose()
+
+    latencies_ms.sort()
+    p50 = statistics.median(latencies_ms)
+    p95 = latencies_ms[int(len(latencies_ms) * 0.95)]
+    mean = statistics.mean(latencies_ms)
+
+    assert p50 < 5.0, f"p50 coordinator latency {p50:.4f}ms exceeded 5.0ms limit"
+    assert p95 < 10.0, f"p95 coordinator latency {p95:.4f}ms exceeded 10.0ms limit"
+    assert mean > 0.0

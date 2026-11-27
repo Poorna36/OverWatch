@@ -91,21 +91,22 @@ DEMO (F-18): `gmail.send` from the agent is rejected; only the user-originated e
 | Metric | Target / Empirical Measurement | How Measured / Status |
 |---|---|---|
 | Gateway Preflight Pipeline Latency | **p50 = 0.20 ms**, **p95 = 0.22 ms**, Mean = 0.20 ms | Measured via `test_gateway_pipeline_latency_benchmark` over 500 iterations with high-resolution monotonic clocks (`time.perf_counter_ns`). |
-| Full Audited Coordinator Latency | **p50 = 3.04 ms**, **p95 = 3.85 ms**, Mean = 3.07 ms | Measured via full preflight + SQLite persistent hash-chain write over 500 iterations. |
-| Cold Container Start (`POST /sessions` to `ACTIVE`) | ~2.5–4.0s (target) | **Blocked on current environment:** Requires live Docker daemon (`/var/run/docker.sock` unavailable). Do not fabricate live startup times without a reachable daemon. |
-| Pre-warmed Container Startup | < 1.0s (target) | Evaluated below: base image pre-caching removes image pull/build overhead. |
-| kbps per bandwidth tier | High ~3 Mbps, Med ~500 kbps, Low ~100 kbps | Verified via `test_bandwidth_tiering.py`; live network shaping via `tc netem` requires Docker/network environment. |
+| Full Audited Coordinator Latency | **p50 = 3.04 ms**, **p95 = 3.85 ms**, Mean = 3.07 ms | Measured via `test_gateway_coordinator_latency_benchmark` (full preflight + SQLite persistent hash-chain write over 500 iterations). |
+| Cold Container Start (`POST /sessions` to `ACTIVE`) | ~2.5–4.0s (target estimate) | **Blocked on current environment:** Requires live Docker daemon (Docker daemon unavailable). Design estimate; empirical timings remain blocked until measured on a Docker-enabled host. |
+| Pre-warmed Container Startup | < 1.0s (target estimate) | **Blocked on current environment:** Requires live Docker daemon. Image caching eliminates layer extraction and build latency; empirical startup timing remains blocked until measured on a Docker-enabled host. |
+| kbps per bandwidth tier | High ~3 Mbps, Med ~500 kbps, Low ~100 kbps (target estimates) | Target thresholds verified via bandwidth tier selection logic (`test_bandwidth_tiering.py`); empirical network shaping and measurement via `tc netem` requires a Docker/network environment. |
 | Block count in a standard run | Exact count from audit table | Query `SELECT COUNT(*) FROM audit_entries WHERE decision = 'blocked'`. |
 
 ### Pre-warmed Container Evaluation
 
-1. **Cold Start Latency Breakdown**:
+1. **Estimated Cold Start Latency Breakdown (Design Estimates)**:
    - Image resolution & layer extraction: 10–60s if cold, 0s if pre-cached locally.
    - Resource allocation: volume `ws_$ID`, network `sess_net_$ID`, proxy attachment: ~500ms–1.5s.
    - Container process initialization (Xvfb, Openbox WM, KasmVNC websocket bridge): ~1.5s–3s.
-2. **Security Invariant Trade-offs**:
+2. **Security Invariant Trade-offs & Policy Limits**:
    - `docs/SECURITY.md §8` mandates strict single-use isolation per session (`ws_<session_id>`, `sess_net_<session_id>`, and complete teardown at `ENDED`). Reusing an already-running container across different sessions introduces cross-session taint, shared filesystem residue, or credential leakage risks.
-   - **Recommended Approach for Demo**: Pre-warm the base container image cache (`images/base`) prior to the demo so that `POST /sessions` never triggers an on-demand Docker build or registry pull. This guarantees cold-container creation finishes in ~3-4s while maintaining full single-use isolation guarantees. A standby container pool bound to ephemeral internal networks can be pre-spawned if sub-second startup is strictly needed.
+   - **Permitted Pre-warming (Image Caching Only)**: In accordance with `docs/SECURITY.md`, pre-warming is strictly limited to pre-building and caching base images (`images/base`) on the host. This ensures `POST /sessions` never triggers an on-demand Docker build or registry pull, keeping fresh container creation within ~3–4s while preserving full single-use isolation guarantees.
+   - **No Standby Container Pools**: Standby container pools or pre-spawned shared containers are not permitted under the security policy, as each session must be bound to its own ephemeral internal network and isolated volume created at session start and destroyed at teardown.
 
 ## 7. CI
 

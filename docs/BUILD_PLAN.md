@@ -67,7 +67,7 @@ Do phases in order. Each task should be one small PR with tests. Never cut Phase
 - [ ] Teardown revokes session-scoped tokens
 
 ## Phase 8: Polish and hardening
-- [x] Bypass suite fully green; record gateway latency (p50/p95) and container start times
+- [ ] Bypass suite fully green; record gateway latency (p50/p95) and container start times
 - [ ] Pre-warmed container for the demo
 - [ ] Recorded backup demo video
 - [x] README quick start verified from a clean clone
