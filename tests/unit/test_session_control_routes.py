@@ -368,3 +368,72 @@ def test_session_container_manager_pause_and_resume_methods() -> None:
     mock_docker.containers.get.side_effect = docker.errors.NotFound("missing")
     with pytest.raises(DockerResourceError):
         mgr.pause_session(SESSION_OWNED)
+
+
+def test_post_session_message_auth_ownership_validation_and_states(
+    control_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /message enforces auth, identical 404 ownership, validation, and states."""
+    client: TestClient = control_env["client"]
+    factory = control_env["factory"]
+    headers = control_env["headers"]
+    url = f"/api/v1/sessions/{SESSION_OWNED}/message"
+
+    # Auth failures -> 401 AUTH_ERROR
+    for bad_headers in [{}, {"Authorization": "Bearer wrong-token"}]:
+        resp = client.post(url, json={"text": "hi"}, headers=bad_headers)
+        assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == ErrorCode.AUTH_ERROR
+
+    monkeypatch.delenv("APP_TOKEN", raising=False)
+    r_unset = client.post(url, json={"text": "hi"}, headers=headers)
+    assert r_unset.status_code == 401
+    assert r_unset.json()["error"]["code"] == ErrorCode.AUTH_ERROR
+    monkeypatch.setenv("APP_TOKEN", TEST_TOKEN)
+
+    # Ownership check -> identical 404 for non-owned and missing
+    r_other = client.post(
+        f"/api/v1/sessions/{SESSION_OTHER}/message",
+        json={"text": "hi"},
+        headers=headers,
+    )
+    r_missing = client.post(
+        f"/api/v1/sessions/{SESSION_MISSING}/message",
+        json={"text": "hi"},
+        headers=headers,
+    )
+    assert r_other.status_code == 404
+    assert r_missing.status_code == 404
+    assert r_other.json() == r_missing.json()
+    assert r_other.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE
+
+    # Body validation -> extra fields rejected (422), blank text rejected (400)
+    r_extra = client.post(url, json={"text": "hi", "extra": 1}, headers=headers)
+    assert r_extra.status_code == 422
+
+    r_blank = client.post(url, json={"text": "   "}, headers=headers)
+    assert r_blank.status_code == 400
+    assert r_blank.json()["error"]["code"] == ErrorCode.ARG_INVALID
+
+    # Non-ACTIVE states rejected with 409 SESSION_INACTIVE
+    for bad_state in (
+        "CREATED",
+        "PLANNING",
+        "AWAITING_PLAN_APPROVAL",
+        "STARTING",
+        "PAUSED",
+        "ENDING",
+        "ENDED",
+        "FAILED",
+    ):
+        _set_state(factory, SESSION_OWNED, bad_state)
+        r_state = client.post(url, json={"text": "hi"}, headers=headers)
+        assert r_state.status_code == 409
+        assert r_state.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE
+
+    # ACTIVE without in-memory runtime/context (e.g. after restart) fails closed
+    _set_state(factory, SESSION_OWNED, "ACTIVE")
+    r_no_runtime = client.post(url, json={"text": "hi"}, headers=headers)
+    assert r_no_runtime.status_code == 409
+    assert r_no_runtime.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE

@@ -678,3 +678,81 @@ def test_resume_revalidates_edited_args_and_post_approval_preflight_blocks(
     assert good_edit_res.status == "completed"
     assert len(ran) == 1
     assert ran[0].args == {"command": "echo safe-edited"}
+
+
+def test_continue_with_messages_and_drain_queue_preserve_memory_only_text(
+    loop_env: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Queued and follow-up messages continue conversation without persisting text."""
+    queued_secret = "QUEUED_MSG_DO_NOT_PERSIST_111"
+    followup_secret = "FOLLOWUP_MSG_DO_NOT_PERSIST_222"
+    queued: list[str] = []
+
+    def _drain() -> list[str]:
+        items = list(queued)
+        queued.clear()
+        return items
+
+    def _turn1(_sys, _msgs, _tools) -> LlmTurnResponse:
+        # Simulate a message arriving while Turn 1 is in progress.
+        queued.append(queued_secret)
+        return LlmTurnResponse(assistant_text="Initial reply.")
+
+    adapter = ScriptedLlmAdapter(
+        [
+            _turn1,
+            LlmTurnResponse(assistant_text="Queued reply."),
+            LlmTurnResponse(assistant_text="Followup reply."),
+        ]
+    )
+    mock_executor = MagicMock()
+    loop = AgentLoop(
+        llm=adapter,
+        coordinator=loop_env["coordinator"],
+        approval_manager=loop_env["approval_manager"],
+        event_bus=loop_env["event_bus"],
+        policy=loop_env["policy"],
+        profile=loop_env["profile"],
+        workspace_root=loop_env["workspace"],
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        res1 = loop.run(
+            session_id=SESSION_ID,
+            request_text=UNIQUE_REQUEST_SECRET,
+            executor=mock_executor,
+            drain_messages=_drain,
+        )
+        assert res1.status == "completed"
+        assert res1.assistant_message == "Queued reply."
+        assert res1.snapshot is not None
+        assert UNIQUE_REQUEST_SECRET not in repr(res1.snapshot)
+        assert queued_secret not in repr(res1.snapshot)
+
+        # Turn 2 received assistant(Initial reply.) + user(queued_secret)
+        turn2_roles = [(m.role, m.content) for m in adapter.recorded_calls[1].messages]
+        assert turn2_roles == [
+            ("user", UNIQUE_REQUEST_SECRET),
+            ("assistant", "Initial reply."),
+            ("user", queued_secret),
+        ]
+
+        res2 = loop.continue_with_messages(
+            snapshot=res1.snapshot,
+            user_messages=[followup_secret],
+            executor=mock_executor,
+        )
+        assert res2.status == "completed"
+        assert res2.assistant_message == "Followup reply."
+        turn3_roles = [(m.role, m.content) for m in adapter.recorded_calls[2].messages]
+        assert turn3_roles[-2:] == [
+            ("assistant", "Queued reply."),
+            ("user", followup_secret),
+        ]
+
+    log_blob = "\n".join(rec.getMessage() for rec in caplog.records)
+    for secret in (UNIQUE_REQUEST_SECRET, queued_secret, followup_secret):
+        assert secret not in log_blob
+        for ev in loop_env["event_bus"].replay(session_id=SESSION_ID):
+            assert secret not in str(ev.data)

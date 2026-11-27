@@ -536,6 +536,50 @@ def takeover_session_route(
     )
 
 
+class _SessionMessageRequest(BaseModel):
+    """Strict validated request body for ``POST /api/v1/sessions/{id}/message``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+
+
+@router.post("/sessions/{session_id}/message")
+def post_session_message_route(
+    session_id: str,
+    body: _SessionMessageRequest,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, bool]:
+    """Deliver an in-memory user message to an ACTIVE session's agent loop."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if not isinstance(body.text, str) or not body.text.strip():
+        raise ApiError(
+            400,
+            ErrorCode.ARG_INVALID,
+            "Message text must be a non-empty string.",
+        )
+    if row.state != "ACTIVE":
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Cannot send message to session in state {row.state}.",
+        )
+
+    try:
+        session_runner.send_session_message(
+            session_id=session_id,
+            text=body.text,
+        )
+    except SessionValidationError as exc:
+        raise ApiError(400, exc.code, str(exc)) from exc
+    except SessionRunnerError as exc:
+        raise ApiError(409, exc.code, str(exc)) from exc
+
+    return {"ok": True}
+
+
 @router.post("/sessions/{session_id}/end")
 def end_session_route(
     session_id: str,

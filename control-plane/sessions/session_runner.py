@@ -31,15 +31,17 @@ import contextlib
 import secrets
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from control_plane.agent.llm import LlmAdapter, LlmAdapterError
 from control_plane.agent.loop import (
+    AgentConversationSnapshot,
     AgentLoop,
     AgentLoopResult,
     LoopStatus,
@@ -144,6 +146,26 @@ class PendingApprovalEntry:
         )
 
 
+@dataclass
+class SessionExecutionState:
+    """In-memory-only conversation snapshot and message queue for one session."""
+
+    session_id: str
+    started: StartedSession
+    is_running: bool = False
+    snapshot: AgentConversationSnapshot | None = field(default=None, repr=False)
+    pending_messages: deque[str] = field(default_factory=deque, repr=False)
+    terminal_status: LoopStatus | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"SessionExecutionState(session_id={self.session_id!r}, "
+            f"is_running={self.is_running}, "
+            f"queued={len(self.pending_messages)}, "
+            f"terminal_status={self.terminal_status!r})"
+        )
+
+
 def _normalize_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None or dt.utcoffset() is None:
         return dt.replace(tzinfo=UTC)
@@ -203,6 +225,7 @@ class RuntimeRegistry:
         self.futures: dict[str, Future[SessionRunRecord]] = {}
         self.run_records: dict[str, SessionRunRecord] = {}
         self.pending_approvals: dict[str, PendingApprovalEntry] = {}
+        self.session_states: dict[str, SessionExecutionState] = {}
         self.session_locks: dict[str, threading.Lock] = {}
         self.executor = ThreadPoolExecutor(
             max_workers=max_workers,
@@ -573,13 +596,91 @@ class SessionRunner:
                     self.on_approval_resolved(resolved)
                 return
 
+    def _drain_queued_messages(self, session_id: str) -> tuple[str, ...]:
+        with self._lock:
+            ctx = self._registry.session_states.get(session_id)
+            if ctx is None or not ctx.pending_messages:
+                return ()
+            drained = tuple(ctx.pending_messages)
+            ctx.pending_messages.clear()
+            return drained
+
+    def _clear_session_execution_state(
+        self,
+        session_id: str,
+        *,
+        terminal_status: LoopStatus | None = None,
+    ) -> None:
+        with self._lock:
+            ctx = self._registry.session_states.get(session_id)
+            if ctx is not None:
+                ctx.is_running = False
+                ctx.snapshot = None
+                ctx.pending_messages.clear()
+                if terminal_status is not None:
+                    ctx.terminal_status = terminal_status
+
     def _finalize_loop_result(
         self,
         *,
         session_id: str,
+        started: StartedSession,
+        runtime: SessionMcpRuntime,
         result: AgentLoopResult,
     ) -> SessionRunRecord:
+        while result.status == "completed" and result.snapshot is not None:
+            with self._lock:
+                if self._registry.is_shutdown or session_id not in self._runtimes:
+                    self._clear_session_execution_state(session_id)
+                    break
+                ctx = self._registry.session_states.get(session_id)
+                if ctx is None or not ctx.pending_messages:
+                    if ctx is not None:
+                        ctx.is_running = False
+                        ctx.snapshot = result.snapshot
+                        ctx.terminal_status = None
+                    break
+                queued = tuple(ctx.pending_messages)
+                ctx.pending_messages.clear()
+
+            current_state = self._get_session_state(session_id)
+            if current_state != "ACTIVE":
+                self._clear_session_execution_state(
+                    session_id, terminal_status="blocked"
+                )
+                result = AgentLoopResult(
+                    session_id=session_id,
+                    status="blocked",
+                    error=None,
+                    calls_used=result.calls_used,
+                    calls_max=result.calls_max,
+                    turns=result.turns,
+                    audit_seqs=result.audit_seqs,
+                )
+                break
+
+            loop = self._build_agent_loop(started=started, runtime=runtime)
+            result = loop.continue_with_messages(
+                snapshot=result.snapshot,
+                user_messages=queued,
+                executor=runtime,
+                session_state=current_state,
+                on_approval_created=lambda approval, cont: (
+                    self._register_pending_approval(
+                        started=started,
+                        approval=approval,
+                        continuation=cont,
+                    )
+                ),
+                drain_messages=lambda: self._drain_queued_messages(session_id),
+            )
+
         if result.status == "awaiting_approval":
+            with self._lock:
+                ctx = self._registry.session_states.get(session_id)
+                if ctx is not None:
+                    ctx.is_running = False
+                    ctx.snapshot = None
             record = SessionRunRecord(
                 session_id=session_id,
                 status="awaiting_approval",
@@ -592,6 +693,11 @@ class SessionRunner:
             with self._lock:
                 self._run_records[session_id] = record
             return record
+
+        if result.status in ("blocked", "budget_exceeded", "error"):
+            self._clear_session_execution_state(
+                session_id, terminal_status=result.status
+            )
 
         if result.status == "error":
             # Mark FAILED only on fatal/upstream loop failures while avoiding
@@ -636,8 +742,21 @@ class SessionRunner:
         """Execute ``AgentLoop`` synchronously using the session's MCP runtime."""
         session_id = started.session_id
         with self._get_session_lock(session_id):
+            with self._lock:
+                ctx = self._registry.session_states.get(session_id)
+                if ctx is None:
+                    ctx = SessionExecutionState(
+                        session_id=session_id,
+                        started=started,
+                        is_running=True,
+                    )
+                    self._registry.session_states[session_id] = ctx
+                else:
+                    ctx.is_running = True
+
             runtime = self.get_runtime(session_id)
             if runtime is None:
+                self._clear_session_execution_state(session_id, terminal_status="error")
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -662,8 +781,10 @@ class SessionRunner:
                             continuation=cont,
                         )
                     ),
+                    drain_messages=lambda: self._drain_queued_messages(session_id),
                 )
             except Exception as exc:
+                self._clear_session_execution_state(session_id, terminal_status="error")
                 with contextlib.suppress(SQLAlchemyError, SessionStartupError):
                     self._update_session_row(session_id, state="FAILED")
                 with contextlib.suppress(EventBusError):
@@ -682,7 +803,12 @@ class SessionRunner:
                     self._run_records[session_id] = record
                 return record
 
-            return self._finalize_loop_result(session_id=session_id, result=result)
+            return self._finalize_loop_result(
+                session_id=session_id,
+                started=started,
+                runtime=runtime,
+                result=result,
+            )
 
     def _resume_session_agent(
         self,
@@ -695,6 +821,7 @@ class SessionRunner:
         session_id = entry.session_id
         with self._get_session_lock(session_id):
             if self._registry.is_shutdown:
+                self._clear_session_execution_state(session_id, terminal_status="error")
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -713,6 +840,10 @@ class SessionRunner:
                 or current_state in ("ENDING", "ENDED", "FAILED")
             ):
                 is_terminal = current_state in ("ENDING", "ENDED", "FAILED")
+                self._clear_session_execution_state(
+                    session_id,
+                    terminal_status="blocked" if is_terminal else "error",
+                )
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="blocked" if is_terminal else "error",
@@ -745,8 +876,10 @@ class SessionRunner:
                             continuation=cont,
                         )
                     ),
+                    drain_messages=lambda: self._drain_queued_messages(session_id),
                 )
             except Exception as exc:
+                self._clear_session_execution_state(session_id, terminal_status="error")
                 if self._get_session_state(session_id) == "ACTIVE":
                     with contextlib.suppress(SQLAlchemyError, SessionStartupError):
                         self._update_session_row(session_id, state="FAILED")
@@ -766,7 +899,168 @@ class SessionRunner:
                     self._run_records[session_id] = record
                 return record
 
-            return self._finalize_loop_result(session_id=session_id, result=result)
+            return self._finalize_loop_result(
+                session_id=session_id,
+                started=entry.started,
+                runtime=runtime,
+                result=result,
+            )
+
+    def _continue_session_messages(
+        self,
+        *,
+        ctx: SessionExecutionState,
+        snapshot: AgentConversationSnapshot,
+        initial_messages: tuple[str, ...],
+    ) -> SessionRunRecord:
+        """Continue a completed ``ACTIVE`` session's conversation with new messages."""
+        session_id = ctx.session_id
+        with self._get_session_lock(session_id):
+            if self._registry.is_shutdown:
+                self._clear_session_execution_state(session_id, terminal_status="error")
+                record = SessionRunRecord(
+                    session_id=session_id,
+                    status="error",
+                    error_code=ErrorCode.SESSION_INACTIVE.value,
+                    error_message="SessionRunner is shut down.",
+                )
+                with self._lock:
+                    self._run_records[session_id] = record
+                return record
+
+            runtime = self.get_runtime(session_id)
+            current_state = self._get_session_state(session_id)
+            if runtime is None or current_state != "ACTIVE":
+                self._clear_session_execution_state(
+                    session_id, terminal_status="blocked"
+                )
+                record = SessionRunRecord(
+                    session_id=session_id,
+                    status="blocked",
+                    error_code=ErrorCode.SESSION_INACTIVE.value,
+                    error_message="Session is not ACTIVE.",
+                )
+                with self._lock:
+                    self._run_records[session_id] = record
+                return record
+
+            extra = self._drain_queued_messages(session_id)
+            combined = initial_messages + extra
+            try:
+                loop = self._build_agent_loop(started=ctx.started, runtime=runtime)
+                result = loop.continue_with_messages(
+                    snapshot=snapshot,
+                    user_messages=combined,
+                    executor=runtime,
+                    session_state=current_state,
+                    on_approval_created=lambda approval, cont: (
+                        self._register_pending_approval(
+                            started=ctx.started,
+                            approval=approval,
+                            continuation=cont,
+                        )
+                    ),
+                    drain_messages=lambda: self._drain_queued_messages(session_id),
+                )
+            except Exception as exc:
+                self._clear_session_execution_state(session_id, terminal_status="error")
+                if self._get_session_state(session_id) == "ACTIVE":
+                    with contextlib.suppress(SQLAlchemyError, SessionStartupError):
+                        self._update_session_row(session_id, state="FAILED")
+                    with contextlib.suppress(EventBusError):
+                        self._emit_state(
+                            session_id,
+                            "FAILED",
+                            reason=f"agent message failed ({type(exc).__name__})",
+                        )
+                record = SessionRunRecord(
+                    session_id=session_id,
+                    status="error",
+                    error_code=ErrorCode.FATAL.value,
+                    error_message="Session message execution failed.",
+                )
+                with self._lock:
+                    self._run_records[session_id] = record
+                return record
+
+            return self._finalize_loop_result(
+                session_id=session_id,
+                started=ctx.started,
+                runtime=runtime,
+                result=result,
+            )
+
+    def send_session_message(
+        self,
+        *,
+        session_id: str,
+        text: str,
+    ) -> Future[SessionRunRecord] | None:
+        """Deliver an in-memory user message to an active session's AgentLoop."""
+        if not isinstance(text, str) or not text.strip():
+            raise SessionValidationError(
+                "Message text must be a non-empty string.",
+                code=ErrorCode.ARG_INVALID,
+            )
+
+        current_state = self._get_session_state(session_id)
+        if current_state != "ACTIVE":
+            raise SessionRunnerError(
+                f"Cannot send message to session in state {current_state}.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+
+        with self._lock:
+            if self._registry.is_shutdown:
+                raise SessionRunnerError(
+                    "SessionRunner is shut down.",
+                    code=ErrorCode.SESSION_INACTIVE,
+                )
+            runtime = self._runtimes.get(session_id)
+            if runtime is None:
+                raise SessionRunnerError(
+                    "Session MCP runtime is unavailable.",
+                    code=ErrorCode.SESSION_INACTIVE,
+                )
+            if any(
+                e.session_id == session_id
+                for e in self._registry.pending_approvals.values()
+            ):
+                raise SessionRunnerError(
+                    "Session is awaiting approval; resolve the pending approval first.",
+                    code=ErrorCode.POLICY_BLOCK,
+                )
+            ctx = self._registry.session_states.get(session_id)
+            if ctx is None:
+                raise SessionRunnerError(
+                    "Session execution context is unavailable.",
+                    code=ErrorCode.SESSION_INACTIVE,
+                )
+            if ctx.terminal_status is not None:
+                raise SessionRunnerError(
+                    "Session agent run is no longer active "
+                    f"(status: {ctx.terminal_status}).",
+                    code=ErrorCode.SESSION_INACTIVE,
+                )
+            if ctx.is_running:
+                ctx.pending_messages.append(text)
+                return self._futures.get(session_id)
+            if ctx.snapshot is not None:
+                snapshot = ctx.snapshot
+                ctx.snapshot = None
+                ctx.is_running = True
+                future = self._executor.submit(
+                    self._continue_session_messages,
+                    ctx=ctx,
+                    snapshot=snapshot,
+                    initial_messages=(text,),
+                )
+                self._futures[session_id] = future
+                return future
+            raise SessionRunnerError(
+                "Session is not eligible to accept messages.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
 
     def on_approval_resolved(
         self,
@@ -795,6 +1089,9 @@ class SessionRunner:
 
             entry = self._registry.pending_approvals.pop(resolution.approval_id, None)
             if entry is None:
+                self._clear_session_execution_state(
+                    resolution.session_id, terminal_status="error"
+                )
                 self._run_records[resolution.session_id] = SessionRunRecord(
                     session_id=resolution.session_id,
                     status="error",
@@ -808,6 +1105,9 @@ class SessionRunner:
             timer_to_cancel = entry.timer
             runtime = self._runtimes.get(resolution.session_id)
             if runtime is None:
+                self._clear_session_execution_state(
+                    resolution.session_id, terminal_status="error"
+                )
                 self._run_records[resolution.session_id] = SessionRunRecord(
                     session_id=resolution.session_id,
                     status="error",
@@ -816,6 +1116,9 @@ class SessionRunner:
                 )
                 future: Future[SessionRunRecord] | None = None
             else:
+                ctx = self._registry.session_states.get(resolution.session_id)
+                if ctx is not None:
+                    ctx.is_running = True
                 future = self._executor.submit(
                     self._resume_session_agent,
                     entry=entry,
@@ -838,6 +1141,11 @@ class SessionRunner:
         with self._lock:
             if self._registry.is_shutdown:
                 raise SessionRunnerError("SessionRunner is shut down.")
+            self._registry.session_states[started.session_id] = SessionExecutionState(
+                session_id=started.session_id,
+                started=started,
+                is_running=True,
+            )
             future = self._executor.submit(
                 self.run_session_agent,
                 started=started,
@@ -864,10 +1172,15 @@ class SessionRunner:
         return self.get_run_record(session_id)
 
     def close_runtime(self, session_id: str) -> None:
-        """Close MCP runtime, cancel pending timers, and drop in-memory continuation."""
+        """Close MCP runtime, cancel pending timers, and drop in-memory state."""
         timers: list[threading.Timer] = []
         with self._lock:
             runtime = self._runtimes.pop(session_id, None)
+            ctx = self._registry.session_states.pop(session_id, None)
+            if ctx is not None:
+                ctx.is_running = False
+                ctx.snapshot = None
+                ctx.pending_messages.clear()
             matching_ids = [
                 aid
                 for aid, entry in self._registry.pending_approvals.items()
@@ -893,6 +1206,11 @@ class SessionRunner:
             futures = list(self._futures.values())
             pending_entries = list(self._registry.pending_approvals.values())
             self._registry.pending_approvals.clear()
+            for ctx in self._registry.session_states.values():
+                ctx.is_running = False
+                ctx.snapshot = None
+                ctx.pending_messages.clear()
+            self._registry.session_states.clear()
 
         for entry in pending_entries:
             if entry.timer is not None:

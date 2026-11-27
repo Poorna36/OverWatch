@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -106,6 +106,26 @@ class PendingApprovalContinuation:
 
 
 @dataclass(frozen=True)
+class AgentConversationSnapshot:
+    """In-memory-only conversation state retained between active turns."""
+
+    session_id: str
+    system_prompt: str
+    tools: tuple[ToolDefinition, ...]
+    messages: tuple[LlmMessage, ...]
+    calls_used: int
+    calls_max: int
+    turns: int
+    audit_seqs: tuple[int, ...] = field(default_factory=tuple)
+
+    def __repr__(self) -> str:
+        return (
+            f"AgentConversationSnapshot(session_id={self.session_id!r}, "
+            f"calls_used={self.calls_used}, turns={self.turns})"
+        )
+
+
+@dataclass(frozen=True)
 class AgentLoopResult:
     """Structured outcome returned after one agent loop execution stops."""
 
@@ -119,6 +139,9 @@ class AgentLoopResult:
     turns: int = 0
     audit_seqs: tuple[int, ...] = field(default_factory=tuple)
     continuation: PendingApprovalContinuation | None = field(
+        default=None, repr=False, compare=False
+    )
+    snapshot: AgentConversationSnapshot | None = field(
         default=None, repr=False, compare=False
     )
 
@@ -271,6 +294,7 @@ class AgentLoop:
         on_approval_created: (
             Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
         ) = None,
+        drain_messages: Callable[[], Sequence[str]] | None = None,
     ) -> AgentLoopResult:
         """Run turns until completion, block, ask (awaiting approval), or budget."""
         if not isinstance(request_text, str) or not request_text.strip():
@@ -323,6 +347,68 @@ class AgentLoop:
             turns=turns,
             audit_seqs=audit_seqs,
             on_approval_created=on_approval_created,
+            drain_messages=drain_messages,
+        )
+
+    def continue_with_messages(
+        self,
+        *,
+        snapshot: AgentConversationSnapshot,
+        user_messages: Sequence[str],
+        executor: Callable[[ValidatedArguments], Any],
+        session_state: SessionState = "ACTIVE",
+        on_approval_created: (
+            Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
+        ) = None,
+        drain_messages: Callable[[], Sequence[str]] | None = None,
+    ) -> AgentLoopResult:
+        """Continue an in-memory conversation with new user message(s)."""
+        cleaned = [m for m in user_messages if isinstance(m, str) and m.strip()]
+        if not cleaned:
+            return AgentLoopResult(
+                session_id=snapshot.session_id,
+                status="error",
+                error=ErrorBody(
+                    code=ErrorCode.ARG_INVALID,
+                    message="Message text must be a non-empty string.",
+                ),
+                calls_used=snapshot.calls_used,
+                calls_max=snapshot.calls_max,
+                turns=snapshot.turns,
+                audit_seqs=snapshot.audit_seqs,
+            )
+
+        if session_state != "ACTIVE":
+            return AgentLoopResult(
+                session_id=snapshot.session_id,
+                status="blocked",
+                error=ErrorBody(
+                    code=ErrorCode.SESSION_INACTIVE,
+                    message=f"Session is not ACTIVE (state: {session_state}).",
+                ),
+                calls_used=snapshot.calls_used,
+                calls_max=snapshot.calls_max,
+                turns=snapshot.turns,
+                audit_seqs=snapshot.audit_seqs,
+            )
+
+        messages = list(snapshot.messages)
+        for text in cleaned:
+            messages.append(LlmMessage(role="user", content=text))
+
+        return self._run_from_state(
+            session_id=snapshot.session_id,
+            system_prompt=snapshot.system_prompt,
+            tools=snapshot.tools,
+            messages=messages,
+            executor=executor,
+            session_state=session_state,
+            calls_used=snapshot.calls_used,
+            calls_max=snapshot.calls_max,
+            turns=snapshot.turns,
+            audit_seqs=list(snapshot.audit_seqs),
+            on_approval_created=on_approval_created,
+            drain_messages=drain_messages,
         )
 
     def resume_after_approval(
@@ -337,6 +423,7 @@ class AgentLoop:
         on_approval_created: (
             Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
         ) = None,
+        drain_messages: Callable[[], Sequence[str]] | None = None,
     ) -> AgentLoopResult:
         """Resume a paused ``AgentLoop`` after an approval resolution."""
         session_id = continuation.session_id
@@ -427,6 +514,7 @@ class AgentLoop:
                 audit_seqs=audit_seqs,
                 pending_tool_calls=continuation.remaining_tool_calls,
                 on_approval_created=on_approval_created,
+                drain_messages=drain_messages,
             )
 
         if edited_args is not None:
@@ -666,6 +754,7 @@ class AgentLoop:
             audit_seqs=audit_seqs,
             pending_tool_calls=continuation.remaining_tool_calls,
             on_approval_created=on_approval_created,
+            drain_messages=drain_messages,
         )
 
     def _record_post_approval_block(
@@ -770,6 +859,7 @@ class AgentLoop:
         on_approval_created: (
             Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
         ) = None,
+        drain_messages: Callable[[], Sequence[str]] | None = None,
     ) -> AgentLoopResult:
         """Execute any remaining tool calls, then run subsequent LLM turns."""
         for idx, llm_call in enumerate(pending_tool_calls):
@@ -793,6 +883,11 @@ class AgentLoop:
             calls_used += 1
 
         while True:
+            if drain_messages is not None:
+                for queued_text in drain_messages():
+                    if isinstance(queued_text, str) and queued_text.strip():
+                        messages.append(LlmMessage(role="user", content=queued_text))
+
             turns += 1
             try:
                 turn = self._llm.next_turn(
@@ -838,6 +933,28 @@ class AgentLoop:
                             audit_seqs=tuple(audit_seqs),
                         )
 
+                messages.append(LlmMessage(role="assistant", content=final_text))
+                if drain_messages is not None:
+                    queued_after = [
+                        q for q in drain_messages() if isinstance(q, str) and q.strip()
+                    ]
+                    if queued_after:
+                        for queued_text in queued_after:
+                            messages.append(
+                                LlmMessage(role="user", content=queued_text)
+                            )
+                        continue
+
+                snapshot = AgentConversationSnapshot(
+                    session_id=session_id,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    messages=tuple(messages),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
                 return AgentLoopResult(
                     session_id=session_id,
                     status="completed",
@@ -846,6 +963,7 @@ class AgentLoop:
                     calls_max=calls_max,
                     turns=turns,
                     audit_seqs=tuple(audit_seqs),
+                    snapshot=snapshot,
                 )
 
             messages.append(

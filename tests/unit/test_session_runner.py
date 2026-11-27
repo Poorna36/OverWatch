@@ -1542,3 +1542,284 @@ def test_session_runner_shutdown_cancels_pending_approval_timers(
         if not registry.is_shutdown:
             runner.shutdown(wait=True)
         engine.dispose()
+
+
+def test_post_message_delivers_followup_without_leaking_text_or_creating_runtime(
+    api_env: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """POST /message delivers follow-up to the same runtime and never persists text."""
+    caplog.set_level(logging.DEBUG)
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+    factory = api_env["factory"]
+    ws: Path = api_env["workspace"]
+
+    followup_secret = "SECRET_FOLLOWUP_TEXT_DO_NOT_PERSIST_5522"
+    turn_num = [0]
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turn_num[0] += 1
+        if turn_num[0] == 1:
+            return LlmTurnResponse(assistant_text="Ready for follow-up.")
+        if turn_num[0] == 2:
+            assert any(
+                m.role == "user" and m.content == followup_secret for m in messages
+            )
+            return LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_followup_write",
+                        tool="files.write",
+                        args={"path": "followup.txt", "content": "ok-followup"},
+                    ),
+                )
+            )
+        return LlmTurnResponse(assistant_text="Follow-up complete.")
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": SECRET_REQUEST_TEXT},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    rec1 = _wait_future(registry, session_id)
+    assert rec1.status == "completed"
+    original_runtime = registry.runtimes[session_id]
+    create_calls_before = docker_env.containers.create.call_count
+
+    msg_resp = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": followup_secret},
+    )
+    assert msg_resp.status_code == 200
+    assert msg_resp.json() == {"ok": True}
+
+    rec2 = _wait_future(registry, session_id)
+    assert rec2.status == "completed"
+    assert (ws / "followup.txt").read_text(encoding="utf-8") == "ok-followup"
+    assert registry.runtimes[session_id] is original_runtime
+    assert docker_env.containers.create.call_count == create_calls_before
+
+    with factory() as db:
+        events = db.scalars(
+            select(EventModel).where(EventModel.session_id == session_id)
+        ).all()
+        audits = db.scalars(
+            select(AuditEntryModel).where(AuditEntryModel.session_id == session_id)
+        ).all()
+        approvals = db.scalars(
+            select(ApprovalModel).where(ApprovalModel.session_id == session_id)
+        ).all()
+        row = db.get(SessionModel, session_id)
+        assert row is not None
+        for ev in events:
+            assert followup_secret not in ev.data
+            assert SECRET_REQUEST_TEXT not in ev.data
+        for audit in audits:
+            assert followup_secret not in audit.args_redacted
+            assert SECRET_REQUEST_TEXT not in audit.args_redacted
+        assert approvals == []
+        assert followup_secret not in (row.receipt_url or "")
+
+    assert followup_secret not in caplog.text
+    assert SECRET_REQUEST_TEXT not in caplog.text
+
+
+def test_post_message_queues_during_running_turn_without_concurrent_turns(
+    api_env: dict[str, Any],
+) -> None:
+    """Message sent while turn is running queues safely and runs after turn 1."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+
+    turn1_entered = threading.Event()
+    release_turn1 = threading.Event()
+    active_turns = 0
+    max_concurrent = 0
+    turn_lock = threading.Lock()
+    queued_secret = "QUEUED_DURING_TURN_1_SECRET_8899"
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        nonlocal active_turns, max_concurrent
+        with turn_lock:
+            active_turns += 1
+            max_concurrent = max(max_concurrent, active_turns)
+        try:
+            if not turn1_entered.is_set():
+                turn1_entered.set()
+                assert release_turn1.wait(timeout=3.0)
+                return LlmTurnResponse(assistant_text="Turn 1 done.")
+            assert any(
+                m.role == "user" and m.content == queued_secret for m in messages
+            )
+            return LlmTurnResponse(assistant_text="Processed queued message.")
+        finally:
+            with turn_lock:
+                active_turns -= 1
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Initial running turn"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+    assert turn1_entered.wait(timeout=3.0)
+
+    msg_resp = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": queued_secret},
+    )
+    assert msg_resp.status_code == 200
+    assert msg_resp.json() == {"ok": True}
+
+    # Release Turn 1; same AgentLoop drains queued message and runs Turn 2 serially.
+    release_turn1.set()
+    rec = _wait_future(registry, session_id)
+    assert rec.status == "completed"
+    assert max_concurrent == 1
+
+    events = api_env["bus"].replay(session_id=session_id)
+    agent_msgs = [e.data["text"] for e in events if e.type == "agent_message"]
+    assert agent_msgs == ["Turn 1 done.", "Processed queued message."]
+    for ev in events:
+        assert queued_secret not in json.dumps(ev.data)
+
+
+def test_post_message_rejected_while_awaiting_approval_and_allowed_after(
+    api_env: dict[str, Any],
+) -> None:
+    """Message while awaiting approval returns 409; works after approval completes."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+
+    turn = [0]
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turn[0] += 1
+        if turn[0] == 1:
+            return LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_ask",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        if turn[0] == 2:
+            return LlmTurnResponse(assistant_text="Denied handled.")
+        assert any(m.role == "user" and m.content == "after denial" for m in messages)
+        return LlmTurnResponse(assistant_text="After denial reply.")
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Ask first", "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    paused = _wait_future(registry, session_id)
+    assert paused.status == "awaiting_approval"
+    aid = paused.pending_approval_id
+    assert aid is not None
+
+    # While awaiting approval -> rejected with 409 POLICY_BLOCK
+    r_msg_wait = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": "premature message"},
+    )
+    assert r_msg_wait.status_code == 409
+    assert r_msg_wait.json()["error"]["code"] == ErrorCode.POLICY_BLOCK
+
+    # Deny approval -> run completes -> follow-up message now succeeds
+    r_deny = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": False},
+    )
+    assert r_deny.status_code == 200
+    assert _wait_future(registry, session_id).status == "completed"
+
+    r_msg_ok = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": "after denial"},
+    )
+    assert r_msg_ok.status_code == 200
+    assert _wait_future(registry, session_id).status == "completed"
+
+
+def test_session_end_drops_queued_messages_and_prevents_subsequent_messages(
+    api_env: dict[str, Any],
+) -> None:
+    """Ending session while turn runs clears queued messages and rejects new ones."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+
+    turn1_entered = threading.Event()
+    release_turn1 = threading.Event()
+    turns_observed: list[int] = []
+
+    def _handler(_messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turns_observed.append(len(_messages))
+        if not turn1_entered.is_set():
+            turn1_entered.set()
+            assert release_turn1.wait(timeout=3.0)
+        return LlmTurnResponse(assistant_text="Turn 1 finished.")
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Start then end"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+    assert turn1_entered.wait(timeout=3.0)
+
+    r_q = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": "queued before end"},
+    )
+    assert r_q.status_code == 200
+
+    # End session while turn 1 is still blocked -> clears queue and closes runtime
+    r_end = client.post(
+        f"/api/v1/sessions/{session_id}/end", headers=api_env["headers"]
+    )
+    assert r_end.status_code == 200
+    assert r_end.json() == {"state": "ENDED"}
+
+    with registry.lock:
+        assert session_id not in registry.session_states
+
+    release_turn1.set()
+    _wait_future(registry, session_id)
+    # Turn 2 must never have run for the dropped queued message
+    assert len(turns_observed) == 1
+
+    # Sending message after ENDED returns 409 SESSION_INACTIVE
+    r_after = client.post(
+        f"/api/v1/sessions/{session_id}/message",
+        headers=api_env["headers"],
+        json={"text": "too late"},
+    )
+    assert r_after.status_code == 409
+    assert r_after.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE
