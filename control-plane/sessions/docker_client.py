@@ -107,16 +107,40 @@ def _is_local_socket(host: str | None) -> bool:
 
 
 def _require_tls_cert_path(cert_path: str) -> docker.tls.TLSConfig:
-    """Build a TLSConfig from *cert_path*, failing closed if any file is missing."""
+    """Build a TLSConfig from *cert_path*, failing closed if any file is unusable."""
     cert_dir = Path(cert_path)
-    missing = [f for f in _TLS_FILES if not (cert_dir / f).is_file()]
+    missing: list[str] = []
+    unreadable: list[str] = []
+    empty: list[str] = []
+
+    for fname in _TLS_FILES:
+        fpath = cert_dir / fname
+        if not fpath.is_file():
+            missing.append(fname)
+            continue
+        try:
+            with fpath.open("rb") as fh:
+                if not fh.read(1):
+                    empty.append(fname)
+        except OSError:
+            unreadable.append(fname)
+
+    problems: list[str] = []
     if missing:
+        problems.append("missing: " + ", ".join(missing))
+    if unreadable:
+        problems.append("unreadable: " + ", ".join(unreadable))
+    if empty:
+        problems.append("empty: " + ", ".join(empty))
+
+    if problems:
         raise DockerClientConfigError(
-            f"DOCKER_CERT_PATH={cert_path!r} is missing required TLS file(s): "
-            + ", ".join(missing)
-            + ". "
-            "All three of ca.pem, cert.pem, and key.pem must exist and be readable."
+            f"DOCKER_CERT_PATH={cert_path!r} failed TLS validation ("
+            + "; ".join(problems)
+            + "). All three of ca.pem, cert.pem, and key.pem must exist, "
+            "be readable, and be non-empty."
         )
+
     return docker.tls.TLSConfig(
         client_cert=(str(cert_dir / "cert.pem"), str(cert_dir / "key.pem")),
         ca_cert=str(cert_dir / "ca.pem"),
@@ -188,7 +212,7 @@ def create_docker_client(
     # Resolve tls_verify: explicit param > env var > default False
     if tls_verify is None:
         env_verify = os.environ.get("DOCKER_TLS_VERIFY", "")
-        tls_verify = env_verify.strip() in ("1", "true", "yes")
+        tls_verify = env_verify.strip().lower() in ("1", "true", "yes")
 
     resolved_cert: str | None = cert_path or os.environ.get("DOCKER_CERT_PATH") or None
 
@@ -224,6 +248,15 @@ def create_docker_client(
             ) from exc
 
     elif _is_local_socket(resolved_host):
+        # Refuse to silently bypass TLS verification when DOCKER_TLS_VERIFY=1.
+        if tls_verify:
+            raise DockerClientConfigError(
+                "DOCKER_TLS_VERIFY is enabled, but DOCKER_HOST is not set to a "
+                "tcp:// TLS endpoint. Set DOCKER_HOST=tcp://<host>:2376 and "
+                "DOCKER_CERT_PATH=<dir>, or unset DOCKER_TLS_VERIFY for local "
+                "host socket development."
+            )
+
         # Host-local socket: use SDK default environment resolution.
         # DOCKER_HOST may be a unix:// or npipe:// URL, or absent (SDK default).
         try:

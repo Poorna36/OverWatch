@@ -16,10 +16,15 @@ Covers:
 - SessionContainerManager.client uses injected factory correctly.
 - SessionContainerManager.client caches after first creation.
 - SessionContainerManager.client wraps DockerClientConfigError as DockerResourceError.
+- Compose configuration uses read-only TLS cert mount, enforces TLS, and never
+  mounts /var/run/docker.sock.
+- .env.example and README.md document placeholders, permissions, startup, and
+  TLS authorization limits without real keys or certificates.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -32,6 +37,7 @@ import control_plane.sessions.docker_client as dc_module
 import docker
 import docker.errors
 import pytest
+import yaml
 from control_plane.sessions.container_manager import (
     DockerResourceError,
     SessionContainerManager,
@@ -43,6 +49,8 @@ from control_plane.sessions.docker_client import (
     get_default_docker_client,
     reset_default_client,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -371,6 +379,152 @@ def test_manager_wraps_config_error_as_docker_resource_error():
 
     with pytest.raises(DockerResourceError, match="Failed to initialise Docker client"):
         _ = mgr.client
+
+
+# ---------------------------------------------------------------------------
+# 13. Additional fail-closed TLS edge cases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("empty_file", ["ca.pem", "cert.pem", "key.pem"])
+def test_reject_empty_tls_file(tmp_path, monkeypatch, empty_file):
+    """Empty (0-byte) TLS certificate or key files must fail closed."""
+    cert_dir = _make_cert_dir(tmp_path)
+    (cert_dir / empty_file).write_text("")
+    monkeypatch.setenv("DOCKER_HOST", "tcp://10.0.0.1:2376")
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+    monkeypatch.setenv("DOCKER_CERT_PATH", str(cert_dir))
+
+    with pytest.raises(DockerClientConfigError, match=empty_file):
+        create_docker_client(ping=False)
+
+
+def test_reject_unreadable_tls_file(tmp_path, monkeypatch):
+    """Unreadable TLS key/cert files must fail closed."""
+    if os.geteuid() == 0:
+        pytest.skip("Root ignores chmod 000 read permissions")
+    cert_dir = _make_cert_dir(tmp_path)
+    key_path = cert_dir / "key.pem"
+    key_path.chmod(0o000)
+    try:
+        monkeypatch.setenv("DOCKER_HOST", "tcp://10.0.0.1:2376")
+        monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+        monkeypatch.setenv("DOCKER_CERT_PATH", str(cert_dir))
+
+        with pytest.raises(DockerClientConfigError, match="unreadable: key.pem"):
+            create_docker_client(ping=False)
+    finally:
+        key_path.chmod(0o600)
+
+
+@pytest.mark.parametrize("host_val", [None, "unix:///var/run/docker.sock"])
+def test_reject_tls_verify_without_tcp_host(monkeypatch, host_val):
+    """DOCKER_TLS_VERIFY=1 without a tcp:// host must not fall back to local socket."""
+    if host_val is None:
+        monkeypatch.delenv("DOCKER_HOST", raising=False)
+    else:
+        monkeypatch.setenv("DOCKER_HOST", host_val)
+    monkeypatch.setenv("DOCKER_TLS_VERIFY", "1")
+
+    with pytest.raises(DockerClientConfigError, match="DOCKER_TLS_VERIFY is enabled"):
+        create_docker_client(ping=False)
+
+
+# ---------------------------------------------------------------------------
+# 14. Compose configuration & documentation placeholder checks
+# ---------------------------------------------------------------------------
+
+
+def _parse_compose_env(env_entries: list[str] | dict[str, str]) -> dict[str, str]:
+    if isinstance(env_entries, dict):
+        return {str(k): "" if v is None else str(v) for k, v in env_entries.items()}
+    parsed: dict[str, str] = {}
+    for item in env_entries:
+        key, _, val = str(item).partition("=")
+        parsed[key] = val
+    return parsed
+
+
+def test_compose_never_mounts_docker_socket_and_enforces_tls():
+    """docker-compose.yml avoids docker.sock and wires verified TLS + RO cert mount."""
+    compose_path = REPO_ROOT / "docker-compose.yml"
+    raw_text = compose_path.read_text(encoding="utf-8")
+    compose_data = yaml.safe_load(raw_text)
+
+    # No PEM certificates or private keys committed in Compose
+    assert "BEGIN CERTIFICATE" not in raw_text
+    assert "PRIVATE KEY" not in raw_text
+
+    services = compose_data["services"]
+    for svc_name, svc in services.items():
+        for vol in svc.get("volumes", []):
+            assert "docker.sock" not in str(
+                vol
+            ), f"Service {svc_name!r} must not mount docker.sock"
+
+    cp = services["control-plane"]
+    env = _parse_compose_env(cp["environment"])
+
+    assert env["DOCKER_TLS_VERIFY"] == "1"
+    assert "tcp://" in env["DOCKER_HOST"]
+    cert_path = env["DOCKER_CERT_PATH"]
+    assert cert_path.startswith("/")
+
+    cert_mounts = [
+        str(vol).rsplit(":", 2)
+        for vol in cp.get("volumes", [])
+        if len(str(vol).rsplit(":", 2)) == 3 and str(vol).rsplit(":", 2)[1] == cert_path
+    ]
+    assert len(cert_mounts) == 1
+    assert cert_mounts[0][2] == "ro"
+
+
+def test_env_example_documents_docker_placeholders_only():
+    """.env.example uses placeholders, no real certs, and keeps DOCKER_* commented."""
+    env_text = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "BEGIN CERTIFICATE" not in env_text
+    assert "PRIVATE KEY" not in env_text
+
+    for var in (
+        "DOCKER_HOST",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_CERT_DIR",
+    ):
+        assert var in env_text
+
+    active_docker_lines = [
+        line
+        for line in env_text.splitlines()
+        if line.strip()
+        and not line.lstrip().startswith("#")
+        and line.lstrip().startswith("DOCKER_")
+    ]
+    assert active_docker_lines == []
+
+
+def test_readme_documents_tls_placement_permissions_startup_and_scope():
+    """README documents cert placement, permissions, startup, and TLS scope limits."""
+    readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "BEGIN CERTIFICATE" not in readme_text
+    assert "PRIVATE KEY" not in readme_text
+
+    for expected in (
+        "/var/run/docker.sock",
+        "ca.pem",
+        "cert.pem",
+        "key.pem",
+        "chmod",
+        "DOCKER_HOST",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+        "DOCKER_TLS_CERT_DIR",
+        "docker compose up",
+        "does not restrict Docker API permissions",
+    ):
+        assert expected in readme_text
 
 
 # ---------------------------------------------------------------------------

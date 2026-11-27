@@ -62,21 +62,50 @@ uvicorn control_plane.api.main:app --host 0.0.0.0 --port 8000 --no-access-log
 
 ### Docker Engine connection
 
-The control plane connects to a Docker daemon to create and destroy session containers.  The Docker socket (`/var/run/docker.sock`) is **never** mounted into the control-plane container or session containers.
+The control plane connects to a Docker daemon to create and destroy session containers. The host Docker socket (`/var/run/docker.sock`) is **never** mounted into the `control-plane` container or any session container.
 
 | Scenario | Configuration |
 |---|---|
-| **Host-local development** (control plane runs directly on the Docker host) | Leave all `DOCKER_*` variables unset.  The SDK uses the host socket automatically. |
-| **Containerised / remote deployment** (Compose or separate host) | Set `DOCKER_HOST`, `DOCKER_TLS_VERIFY=1`, and `DOCKER_CERT_PATH` in your `.env`.  Plain `tcp://` endpoints without TLS are rejected at startup. |
+| **Host-local development** (`uvicorn` on the Docker host) | Leave all `DOCKER_*` variables unset. The Docker SDK uses the host's normal local socket configuration automatically. |
+| **Containerised Compose / remote deployment** | `docker-compose.yml` pins `DOCKER_TLS_VERIFY=1`, mounts the host certificate directory read-only at `/etc/overwatch/docker-tls`, and sets `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`. Plain `tcp://` endpoints and incomplete certificate sets fail closed. |
 
-```bash
-# .env — remote TLS endpoint (replace placeholders; never commit certificates)
-DOCKER_HOST=tcp://replace_with_docker_host_ip:2376
-DOCKER_TLS_VERIFY=1
-DOCKER_CERT_PATH=/path/to/docker/tls/certs
-```
+#### Remote Docker TLS setup for Compose
 
-Mount the certificate directory into the Compose container (see commented example in `docker-compose.yml`) and ensure it contains `ca.pem`, `cert.pem`, and `key.pem`.  See `.env.example` for the full list of supported environment variables.
+1. **Certificate placement and permissions (on the host, outside the repository)**
+
+   Provision `ca.pem`, `cert.pem`, and `key.pem` for the remote Docker Engine's TLS endpoint (`:2376`). Never commit real certificates or private keys to git. Place them in a restricted host directory (for example `/etc/overwatch/docker-tls`):
+
+   ```bash
+   sudo mkdir -p /etc/overwatch/docker-tls
+   sudo chmod 0700 /etc/overwatch/docker-tls
+   sudo chmod 0444 /etc/overwatch/docker-tls/ca.pem /etc/overwatch/docker-tls/cert.pem
+   sudo chmod 0400 /etc/overwatch/docker-tls/key.pem
+   ```
+
+   `docker-compose.yml` mounts `${DOCKER_TLS_CERT_DIR:-/etc/overwatch/docker-tls}` read-only (`:ro`) into `/etc/overwatch/docker-tls` inside `control-plane`, matching `DOCKER_CERT_PATH=/etc/overwatch/docker-tls`.
+
+2. **Environment configuration**
+
+   Copy `.env.example` to `.env` and set your secrets plus the Docker TLS settings (use placeholders until replaced on the target host):
+
+   ```bash
+   # .env — remote TLS endpoint for Compose (replace placeholders; never commit certs)
+   DOCKER_HOST=tcp://replace-with-docker-host:2376
+   DOCKER_TLS_CERT_DIR=/path/to/docker/tls/certs
+   ```
+
+   (`DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/etc/overwatch/docker-tls` are already enforced by `docker-compose.yml`. If you run `uvicorn` directly on a host against a remote TLS daemon instead of Compose, also set `DOCKER_TLS_VERIFY=1` and `DOCKER_CERT_PATH=/path/to/docker/tls/certs`.)
+
+3. **Validate and start the service**
+
+   ```bash
+   docker compose config          # verify rendered Compose configuration
+   docker compose up -d --build   # start control-plane + egress-proxy
+   ```
+
+> **Security note on TLS scope:** Mutual TLS authenticates the client and daemon and encrypts traffic in transit, **but it does not restrict Docker API permissions**. Any client holding a valid certificate can exercise whatever Docker Engine API capabilities the remote daemon exposes. Restrict access to the remote Docker daemon (e.g. dedicated host/network isolation or an external authorization layer) to trusted control-plane use only.
+
+See `.env.example` for the full list of supported environment variables.
 
 Details and commands are finalized during Phase 1 of [docs/BUILD_PLAN.md](docs/BUILD_PLAN.md).
 
