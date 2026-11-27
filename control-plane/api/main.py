@@ -5,6 +5,7 @@ from __future__ import annotations
 from control_plane.api.approvals import router as approvals_router
 from control_plane.api.audit import router as audit_router
 from control_plane.api.deps import ApiError
+from control_plane.api.devices import router as devices_router
 from control_plane.api.profiles import router as profiles_router
 from control_plane.api.sessions import router as sessions_router
 from control_plane.api.stream import router as stream_router
@@ -36,6 +37,7 @@ def health() -> dict[str, str]:
 
 app.include_router(approvals_router)
 app.include_router(audit_router)
+app.include_router(devices_router)
 app.include_router(profiles_router)
 app.include_router(sessions_router)
 app.include_router(stream_router)

@@ -146,3 +146,19 @@ class ApprovalModel(Base):
     session: Mapped[SessionModel] = relationship(
         "SessionModel", back_populates="approvals"
     )
+
+
+class DevicePushTokenModel(Base):
+    """Encrypted device push tokens associated with an authenticated owner."""
+
+    __tablename__ = "device_push_tokens"
+
+    token_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    token_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (Index("idx_device_push_tokens_owner", "owner_id", "revoked_at"),)

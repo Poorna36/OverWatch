@@ -10,6 +10,7 @@ services:
     environment:
       - APP_TOKEN=${APP_TOKEN}
       - VAULT_KEY=${VAULT_KEY}
+      - PUSH_TOKEN_KEY=${PUSH_TOKEN_KEY:-}
       - LLM_API_KEY=${LLM_API_KEY}
       - DATABASE_URL=sqlite:////app/data/overwatch.db
       - OVERWATCH_SQUID_ACL_PATH=/app/squid-config/sessions.conf
