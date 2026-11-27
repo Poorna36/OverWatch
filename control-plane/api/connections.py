@@ -41,6 +41,7 @@ class _GoogleOAuthStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token_mode: ConnectorTokenMode = "linked"
+    redirect_uri: str | None = None
 
 
 class _GoogleOAuthCallbackRequest(BaseModel):
@@ -48,6 +49,7 @@ class _GoogleOAuthCallbackRequest(BaseModel):
 
     code: str
     state: str
+    redirect_uri: str | None = None
 
 
 @router.get("/connections")
@@ -80,8 +82,13 @@ def start_google_oauth_route(
 ) -> dict[str, str]:
     """Begin test-user Google OAuth with draft-only scopes."""
     mode: ConnectorTokenMode = payload.token_mode if payload is not None else "linked"
+    redirect_uri = payload.redirect_uri if payload is not None else None
     try:
-        return oauth.start_oauth(owner_id=owner_id, token_mode=mode)
+        return oauth.start_oauth(
+            owner_id=owner_id, token_mode=mode, redirect_uri=redirect_uri
+        )
+    except OAuthFlowError as exc:
+        raise ApiError(400, ErrorCode.AUTH_ERROR, str(exc)) from exc
     except OAuthConfigError as exc:
         raise ApiError(500, ErrorCode.UPSTREAM_ERROR, str(exc)) from exc
 
@@ -95,7 +102,10 @@ def complete_google_oauth_route(
     """Complete Google OAuth code exchange and store encrypted tokens in vault."""
     try:
         summary = oauth.complete_oauth(
-            owner_id=owner_id, code=payload.code, state=payload.state
+            owner_id=owner_id,
+            code=payload.code,
+            state=payload.state,
+            redirect_uri=payload.redirect_uri,
         )
     except OAuthFlowError as exc:
         raise ApiError(400, ErrorCode.AUTH_ERROR, str(exc)) from exc

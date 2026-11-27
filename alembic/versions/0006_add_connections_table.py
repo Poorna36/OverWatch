@@ -48,5 +48,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    conn_count = conn.execute(sa.text("SELECT COUNT(*) FROM connections")).scalar()
+    if conn_count and conn_count > 0:
+        raise RuntimeError(
+            f"Cannot downgrade migration 0006: populated data exists "
+            f"({conn_count} connections). Active connections must be revoked first."
+        )
     op.drop_index("idx_connections_owner_provider", table_name="connections")
     op.drop_table("connections")

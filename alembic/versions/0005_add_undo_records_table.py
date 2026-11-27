@@ -49,5 +49,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    undo_count = conn.execute(sa.text("SELECT COUNT(*) FROM undo_records")).scalar()
+    if undo_count and undo_count > 0:
+        raise RuntimeError(
+            f"Cannot downgrade migration 0005: populated data exists "
+            f"({undo_count} undo records). Undo history is retained."
+        )
     op.drop_index("idx_undo_records_session", table_name="undo_records")
     op.drop_table("undo_records")

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from alembic.config import Config
 from control_plane.api.deps import (
     derive_owner_id,
@@ -18,7 +20,11 @@ from control_plane.api.deps import (
     get_session_factory,
 )
 from control_plane.api.main import app
-from control_plane.connectors.google_oauth import DRAFT_ONLY_SCOPES, GoogleOAuthService
+from control_plane.connectors.google_oauth import (
+    DRAFT_ONLY_SCOPES,
+    GoogleOAuthService,
+    OAuthFlowError,
+)
 from control_plane.connectors.google_tools import GoogleConnectorClient
 from control_plane.contracts import ErrorCode, ToolCall
 from control_plane.db.models import AuditEntryModel, ConnectionModel, SessionModel
@@ -34,6 +40,7 @@ from control_plane.vault.google_vault import (
 )
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, select
+from sqlalchemy.orm import Session
 
 from alembic import command
 
@@ -324,5 +331,132 @@ def test_alembic_migration_0006_upgrade_and_downgrade(tmp_path: Path) -> None:
     engine = create_db_engine(f"sqlite:///{db_path}")
     try:
         assert "connections" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
+def test_oauth_state_ttl_and_replay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-123")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret-456")
+    monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/callback")
+    monkeypatch.setenv("VAULT_KEY", base64.b64encode(b"k" * 32).decode("ascii"))
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'oauth_ttl.db'}")
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        vault = GoogleConnectorVault(session_factory)
+        service = GoogleOAuthService(
+            vault=vault,
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda req: httpx.Response(
+                        200,
+                        json={"access_token": "acc", "scope": "compose"},
+                    )
+                )
+            ),
+            state_ttl_s=0.05,
+        )
+
+        # 1. State expiration
+        started = service.start_oauth(owner_id="owner_1")
+        state = started["state"]
+        time.sleep(0.08)
+        with pytest.raises(OAuthFlowError, match="expired"):
+            service.complete_oauth(owner_id="owner_1", code="code-1", state=state)
+
+        # 2. Replay prevention
+        started_fresh = service.start_oauth(owner_id="owner_1")
+        state_fresh = started_fresh["state"]
+        service.complete_oauth(owner_id="owner_1", code="code-1", state=state_fresh)
+        with pytest.raises(OAuthFlowError, match="Invalid or expired"):
+            service.complete_oauth(owner_id="owner_1", code="code-2", state=state_fresh)
+    finally:
+        engine.dispose()
+
+
+def test_oauth_redirect_uri_validation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "client-123")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "secret-456")
+    monkeypatch.setenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/callback")
+    monkeypatch.setenv("VAULT_KEY", base64.b64encode(b"k" * 32).decode("ascii"))
+
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'oauth_redirect.db'}")
+    init_db(engine)
+    session_factory = create_session_factory(engine)
+    try:
+        vault = GoogleConnectorVault(session_factory)
+        service = GoogleOAuthService(
+            vault=vault,
+            http_client=httpx.Client(
+                transport=httpx.MockTransport(
+                    lambda req: httpx.Response(
+                        200,
+                        json={"access_token": "acc", "scope": "compose"},
+                    )
+                )
+            ),
+        )
+
+        # Mismatched redirect_uri on start
+        with pytest.raises(OAuthFlowError, match="Invalid redirect_uri"):
+            service.start_oauth(
+                owner_id="owner_1", redirect_uri="http://attacker.com/evil"
+            )
+
+        # Matching redirect_uri on start
+        started = service.start_oauth(
+            owner_id="owner_1", redirect_uri="http://localhost:8000/callback"
+        )
+        state = started["state"]
+
+        # Mismatched redirect_uri on complete
+        with pytest.raises(OAuthFlowError, match="Invalid redirect_uri"):
+            service.complete_oauth(
+                owner_id="owner_1",
+                code="code-1",
+                state=state,
+                redirect_uri="http://attacker.com/evil",
+            )
+    finally:
+        engine.dispose()
+
+
+def test_migration_downgrade_retention_guards(tmp_path: Path) -> None:
+    db_path = tmp_path / "retention_guards.db"
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+
+    command.upgrade(cfg, "head")
+    engine = create_db_engine(f"sqlite:///{db_path}")
+    try:
+        with Session(engine) as db:
+            db.execute(
+                sa.text(
+                    "INSERT INTO sessions (session_id, state, profile, owner_id, "
+                    "created_at, updated_at) VALUES ('s_1', 'ACTIVE', 'general', "
+                    "'owner_1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                )
+            )
+            db.execute(
+                sa.text(
+                    "INSERT INTO plans (plan_id, session_id, summary, profile, "
+                    "steps_json, scopes_json, plan_hash, status, created_at, "
+                    "updated_at) VALUES ('p_1', 's_1', 'test plan', 'general', "
+                    "'[]', '[]', 'hash123', 'pending', "
+                    "'2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+                )
+            )
+            db.commit()
+
+        # Attempting downgrade of 0004 with populated plans table must fail
+        with pytest.raises(RuntimeError, match="Cannot downgrade migration 0004"):
+            command.downgrade(cfg, "0003_add_device_push_tokens")
     finally:
         engine.dispose()

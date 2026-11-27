@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
@@ -22,6 +23,16 @@ DRAFT_ONLY_SCOPES: tuple[str, ...] = (
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
 )
+
+STATE_TTL_SECONDS: float = 600.0  # 10 minutes bounded state TTL
+
+
+@dataclass(frozen=True)
+class _PendingState:
+    owner_id: str
+    token_mode: ConnectorTokenMode
+    redirect_uri: str
+    created_at: float
 
 
 class OAuthConfigError(Exception):
@@ -66,29 +77,52 @@ class GoogleOAuthService:
         vault: GoogleConnectorVault,
         http_client: httpx.Client | None = None,
         timeout_s: float = 5.0,
+        state_ttl_s: float = STATE_TTL_SECONDS,
     ) -> None:
         self._vault = vault
         self._http_client = http_client
         self._timeout_s = timeout_s
+        self._state_ttl_s = state_ttl_s
         self._lock = threading.Lock()
-        self._pending_states: dict[str, tuple[str, ConnectorTokenMode]] = {}
+        self._pending_states: dict[str, _PendingState] = {}
+
+    def _prune_expired_states(self, now: float) -> None:
+        cutoff = now - self._state_ttl_s
+        expired = [k for k, v in self._pending_states.items() if v.created_at < cutoff]
+        for k in expired:
+            self._pending_states.pop(k, None)
 
     def start_oauth(
         self,
         *,
         owner_id: str,
         token_mode: ConnectorTokenMode = "linked",
+        redirect_uri: str | None = None,
     ) -> dict[str, str]:
         """Generate a Google OAuth consent URL with draft-only scopes."""
         cfg = GoogleOAuthConfig.from_env()
+        effective_redirect = cfg.redirect_uri
+        if redirect_uri is not None and redirect_uri != effective_redirect:
+            raise OAuthFlowError(
+                f"Invalid redirect_uri: does not match configured redirect URI "
+                f"({effective_redirect})."
+            )
+
+        now = time.time()
         state = secrets.token_urlsafe(24)
         with self._lock:
-            self._pending_states[state] = (owner_id, token_mode)
+            self._prune_expired_states(now)
+            self._pending_states[state] = _PendingState(
+                owner_id=owner_id,
+                token_mode=token_mode,
+                redirect_uri=effective_redirect,
+                created_at=now,
+            )
 
         params = urlencode(
             {
                 "client_id": cfg.client_id,
-                "redirect_uri": cfg.redirect_uri,
+                "redirect_uri": effective_redirect,
                 "response_type": "code",
                 "scope": " ".join(DRAFT_ONLY_SCOPES),
                 "access_type": "offline",
@@ -104,20 +138,32 @@ class GoogleOAuthService:
         owner_id: str,
         code: str,
         state: str,
+        redirect_uri: str | None = None,
     ) -> ConnectionSummary:
         """Verify state, exchange auth code, and store encrypted tokens in vault."""
+        now = time.time()
         with self._lock:
+            self._prune_expired_states(now)
             expected = self._pending_states.pop(state, None)
-        if expected is None or expected[0] != owner_id:
+        if expected is None or expected.owner_id != owner_id:
             raise OAuthFlowError("Invalid or expired OAuth state.")
-        token_mode = expected[1]
-        cfg = GoogleOAuthConfig.from_env()
+        if (now - expected.created_at) > self._state_ttl_s:
+            raise OAuthFlowError("OAuth state has expired.")
 
+        cfg = GoogleOAuthConfig.from_env()
+        if redirect_uri is not None and (
+            redirect_uri != expected.redirect_uri or redirect_uri != cfg.redirect_uri
+        ):
+            raise OAuthFlowError(
+                "Invalid redirect_uri: does not match configured redirect URI."
+            )
+
+        token_mode = expected.token_mode
         form = {
             "code": code,
             "client_id": cfg.client_id,
             "client_secret": cfg.client_secret,
-            "redirect_uri": cfg.redirect_uri,
+            "redirect_uri": expected.redirect_uri,
             "grant_type": "authorization_code",
         }
         if self._http_client is not None:

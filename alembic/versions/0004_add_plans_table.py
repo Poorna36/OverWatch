@@ -42,5 +42,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    conn = op.get_bind()
+    plan_count = conn.execute(sa.text("SELECT COUNT(*) FROM plans")).scalar()
+    if plan_count and plan_count > 0:
+        raise RuntimeError(
+            f"Cannot downgrade migration 0004: populated data exists "
+            f"({plan_count} plans). Plan records are permanently retained."
+        )
     op.drop_index("idx_plans_session", table_name="plans")
     op.drop_table("plans")
