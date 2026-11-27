@@ -1225,52 +1225,62 @@ async def session_view_websockify(
         while True:
             try:
                 frame = await anyio.to_thread.run_sync(bridge.recv_frame)
-            except McpRuntimeError:
+            except (McpRuntimeError, Exception):
                 with contextlib.suppress(Exception):
                     await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                break
+            except asyncio.CancelledError:
                 break
             if frame is None:
                 break
             opcode, data = frame
-            if opcode == 0x1:
-                await websocket.send_text(data.decode("utf-8", errors="replace"))
-            else:
-                await websocket.send_bytes(data)
+            try:
+                if opcode == 0x1:
+                    await websocket.send_text(data.decode("utf-8", errors="replace"))
+                else:
+                    await websocket.send_bytes(data)
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                break
 
     async def _pump_client_to_upstream() -> None:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                break
             msg_type = message.get("type")
             if msg_type == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
                 payload = message["bytes"]
                 if len(payload) > _MAX_VIEW_WS_FRAME_BYTES:
-                    await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
                     break
                 await anyio.to_thread.run_sync(bridge.send_frame, 0x2, payload)
             elif message.get("text") is not None:
                 payload = message["text"].encode("utf-8")
                 if len(payload) > _MAX_VIEW_WS_FRAME_BYTES:
-                    await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
                     break
                 await anyio.to_thread.run_sync(bridge.send_frame, 0x1, payload)
 
     upstream_task = asyncio.create_task(_pump_upstream_to_client())
     client_task = asyncio.create_task(_pump_client_to_upstream())
     try:
-        _, pending = await asyncio.wait(
-            {upstream_task, client_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
-    except WebSocketDisconnect:
-        pass
+        try:
+            await asyncio.wait(
+                {upstream_task, client_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
     finally:
-        for task in (upstream_task, client_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
-        await anyio.to_thread.run_sync(bridge.close)
+        with anyio.CancelScope(shield=True):
+            with contextlib.suppress(BaseException):
+                await anyio.to_thread.run_sync(bridge.close)
+            for task in (upstream_task, client_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(upstream_task, client_task, return_exceptions=True)

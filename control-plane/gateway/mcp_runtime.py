@@ -732,10 +732,17 @@ class ViewWebSocketBridge:
             if self._closed:
                 return
             self._closed = True
+            for target in (self._sock, getattr(self._sock, "_sock", None)):
+                if target is not None and hasattr(target, "shutdown"):
+                    with contextlib.suppress(OSError, ValueError):
+                        target.shutdown(socket.SHUT_RDWR)
+                    break
             with contextlib.suppress(Exception):
                 self._sock.close()
         if self._on_close is not None:
-            self._on_close(self)
+            callback = self._on_close
+            self._on_close = None
+            callback(self)
 
 
 class SessionMcpRuntime:
@@ -1126,9 +1133,14 @@ class SessionMcpRuntime:
             ) from exc
 
         sock = getattr(raw_sock, "_sock", raw_sock)
+
+        def _on_bridge_close(b: ViewWebSocketBridge) -> None:
+            with self._lock:
+                self._view_bridges.discard(b)
+
         bridge = ViewWebSocketBridge(
             sock=sock,
-            on_close=lambda b: self._view_bridges.discard(b),
+            on_close=_on_bridge_close,
         )
         try:
             bridge.handshake()

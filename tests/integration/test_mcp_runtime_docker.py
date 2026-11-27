@@ -9,6 +9,7 @@ for ``files``, ``terminal``, and ``desktop`` (auto-starting Xvfb + openbox).
 from __future__ import annotations
 
 import struct
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -444,9 +445,35 @@ def test_live_view_browser_acceptance_docker(
             assert len(fb_upd) > 4
 
         # 6. Disconnect cleanup: verify bridge is closed and discarded from runtime
+        for _ in range(50):
+            if len(runtime._view_bridges) == 0:
+                break
+            time.sleep(0.05)
         assert len(runtime._view_bridges) == 0
 
-        # 7. Preserved screenshot fallback on same display without conflict
+        # 7. Cross-session isolation: view token and cookie cannot access other sessions
+        other_session_id = "sess_diff_isolation"
+        assert api_client.get(
+            f"/api/v1/sessions/{other_session_id}/view?token={token}",
+            follow_redirects=False,
+        ).status_code in (401, 404)
+        assert api_client.get(
+            f"/api/v1/sessions/{other_session_id}/view/vnc.html",
+            headers={"Cookie": f"overwatch_view={token}"},
+        ).status_code in (401, 404)
+        with pytest.raises(WebSocketDisconnect) as exc_cross:
+            with api_client.websocket_connect(
+                f"/api/v1/sessions/{other_session_id}/view/websockify",
+                headers={
+                    "Origin": public_base,
+                    "Cookie": f"overwatch_view={token}",
+                },
+                subprotocols=["binary"],
+            ):
+                pass
+        assert exc_cross.value.code == 1008
+
+        # 8. Preserved screenshot fallback on same display without conflict
         shot_resp = api_client.get(
             f"/api/v1/sessions/{session_id}/screenshot",
             headers=headers,
