@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import secrets
 from collections.abc import Callable
 from datetime import datetime
@@ -22,6 +21,11 @@ from functools import partial
 from typing import Literal
 
 import anyio
+from control_plane.api.bandwidth import (
+    BandwidthController,
+    get_bandwidth_controller,
+    validate_kbps,
+)
 from control_plane.api.deps import (
     get_app_token,
     get_event_bus,
@@ -83,12 +87,7 @@ class _ThroughputMessage(BaseModel):
     @field_validator("kbps", mode="before")
     @classmethod
     def _validate_kbps(cls, value: object) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ValueError("kbps must be a finite non-negative number.")
-        numeric = float(value)
-        if not math.isfinite(numeric) or numeric < 0:
-            raise ValueError("kbps must be a finite non-negative number.")
-        return numeric
+        return validate_kbps(value)
 
 
 def get_stream_poll_interval() -> float:
@@ -132,24 +131,24 @@ def _parse_hello_message(raw_text: str) -> _HelloMessage | None:
         return None
 
 
-def _is_valid_runtime_client_message(raw_text: str) -> bool:
+def _parse_runtime_client_message(
+    raw_text: str,
+) -> _PingMessage | _ThroughputMessage | None:
     try:
         payload = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
-        return False
+        return None
     if not isinstance(payload, dict):
-        return False
+        return None
     msg_type = payload.get("type")
     try:
         if msg_type == "ping":
-            _PingMessage.model_validate(payload)
-            return True
+            return _PingMessage.model_validate(payload)
         if msg_type == "throughput":
-            _ThroughputMessage.model_validate(payload)
-            return True
+            return _ThroughputMessage.model_validate(payload)
     except ValidationError:
-        return False
-    return False
+        return None
+    return None
 
 
 async def _receive_client_text(websocket: WebSocket) -> tuple[bool, str | None]:
@@ -175,6 +174,7 @@ async def stream_session_events(
     configured_token: str | None = Depends(get_app_token),
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     event_bus: EventBus = Depends(get_event_bus),
+    bandwidth_controller: BandwidthController = Depends(get_bandwidth_controller),
     poll_interval_s: float = Depends(get_stream_poll_interval),
     clock: Callable[[], datetime] = Depends(get_stream_clock),
 ) -> None:
@@ -286,13 +286,46 @@ async def stream_session_events(
                 stop_event.set()
                 return
 
-            if frame_text is None or not _is_valid_runtime_client_message(frame_text):
+            if frame_text is None:
                 stop_event.set()
                 try:
                     await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
                 except RuntimeError:
                     pass
                 return
+
+            parsed_msg = _parse_runtime_client_message(frame_text)
+            if parsed_msg is None:
+                stop_event.set()
+                try:
+                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                except RuntimeError:
+                    pass
+                return
+
+            if isinstance(parsed_msg, _ThroughputMessage):
+                transition = bandwidth_controller.record(
+                    session_id,
+                    parsed_msg.kbps,
+                    now=clock(),
+                )
+                if transition is not None:
+                    try:
+                        await anyio.to_thread.run_sync(
+                            partial(
+                                event_bus.publish,
+                                session_id=session_id,
+                                event_type="tier_change",
+                                data={
+                                    "tier": transition.tier,
+                                    "previous_tier": transition.previous_tier,
+                                    "kbps": transition.kbps,
+                                },
+                                ts=transition.ts,
+                            )
+                        )
+                    except EventBusError:
+                        pass
 
     sender_task = asyncio.create_task(_pump_live_events())
     reader_task = asyncio.create_task(_consume_client_frames())
