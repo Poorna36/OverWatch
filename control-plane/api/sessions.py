@@ -25,6 +25,7 @@ from control_plane.audit.audit_writer import format_utc_iso
 from control_plane.contracts import ErrorCode, SessionSummary
 from control_plane.db.models import SessionModel
 from control_plane.events.event_bus import EventBus, EventBusError
+from control_plane.gateway.mcp_runtime import McpRuntimeError
 from control_plane.sessions.container_manager import (
     ContainerManagerError,
     SessionContainerManager,
@@ -35,7 +36,7 @@ from control_plane.sessions.session_runner import (
     SessionStartupError,
     SessionValidationError,
 )
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -279,7 +280,7 @@ def get_session_detail(
             token=token,
         )
 
-    # view_url is omitted until the live-view proxy is implemented.
+    # view_url is omitted until a secure live-view bridge is implemented.
     return payload
 
 
@@ -653,3 +654,43 @@ def end_session_route(
         ) from exc
 
     return {"state": "ENDED"}
+
+
+@router.get("/sessions/{session_id}/screenshot")
+async def get_session_screenshot(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> Response:
+    """Capture and return a live JPEG screenshot for an owned active session."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state not in ACTIVE_STREAM_STATES:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not active (state={row.state}).",
+        )
+
+    runtime = session_runner.get_runtime(session_id)
+    if runtime is None:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' runtime is not active.",
+        )
+
+    try:
+        jpeg_bytes = await anyio.to_thread.run_sync(runtime.capture_screenshot_jpeg)
+    except McpRuntimeError as exc:
+        raise ApiError(
+            502,
+            ErrorCode.UPSTREAM_ERROR,
+            f"Failed to capture session screenshot: {exc}",
+        ) from exc
+
+    return Response(
+        content=jpeg_bytes,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )

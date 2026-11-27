@@ -14,6 +14,7 @@ from control_plane.api.deps import (
     get_policy_loader,
     get_profile_loader,
     get_session_factory,
+    get_session_runner,
 )
 from control_plane.api.main import app
 from control_plane.api.stream import get_stream_clock
@@ -21,6 +22,7 @@ from control_plane.api.stream_tokens import verify_stream_token
 from control_plane.contracts import ErrorCode
 from control_plane.db.models import SessionModel
 from control_plane.db.session import create_db_engine, create_session_factory, init_db
+from control_plane.gateway.mcp_runtime import McpTransportError
 from control_plane.gateway.policy_loader import PolicyLoader
 from control_plane.sessions.profile_loader import ProfileLoader
 from fastapi.testclient import TestClient
@@ -425,3 +427,79 @@ def test_list_sessions_isolates_owner_shape_and_orders_newest_first(
         assert "stream_url" not in item
         assert "view_url" not in item
         assert "request_text" not in item
+
+
+def test_screenshot_route_auth_ownership_inactive_and_jpeg_output(
+    read_api_env: dict[str, Any],
+) -> None:
+    client: TestClient = read_api_env["client"]
+    headers = read_api_env["headers"]
+    factory = read_api_env["factory"]
+
+    class _FakeRuntime:
+        def __init__(self, payload: bytes | Exception) -> None:
+            self._payload = payload
+
+        def capture_screenshot_jpeg(self) -> bytes:
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class _FakeRunner:
+        def __init__(self, runtime: _FakeRuntime | None) -> None:
+            self._runtime = runtime
+
+        def get_runtime(self, session_id: str) -> _FakeRuntime | None:
+            if session_id == SESSION_ACTIVE:
+                return self._runtime
+            return None
+
+    fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\xff\xd9"
+    holder: dict[str, Any] = {"runner": _FakeRunner(_FakeRuntime(fake_jpeg))}
+    app.dependency_overrides[get_session_runner] = lambda: holder["runner"]
+
+    # Unauthenticated -> 401
+    unauth = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot")
+    assert unauth.status_code == 401
+    assert unauth.json()["error"]["code"] == ErrorCode.AUTH_ERROR.value
+
+    # Missing and non-owned -> identical 404
+    missing = client.get(
+        f"/api/v1/sessions/{SESSION_MISSING}/screenshot", headers=headers
+    )
+    non_owned = client.get(
+        f"/api/v1/sessions/{SESSION_OTHER}/screenshot", headers=headers
+    )
+    assert missing.status_code == 404
+    assert non_owned.status_code == 404
+    assert missing.json() == non_owned.json()
+
+    # Valid JPEG response
+    ok = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot", headers=headers)
+    assert ok.status_code == 200
+    assert ok.headers["content-type"].startswith("image/jpeg")
+    assert ok.headers.get("cache-control") == "no-store"
+    assert ok.content == fake_jpeg
+
+    # Runtime failure -> 502 UPSTREAM_ERROR
+    holder["runner"] = _FakeRunner(_FakeRuntime(McpTransportError("scrot failed")))
+    err = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot", headers=headers)
+    assert err.status_code == 502
+    assert err.json()["error"]["code"] == ErrorCode.UPSTREAM_ERROR.value
+
+    # Missing runtime -> 409 SESSION_INACTIVE
+    holder["runner"] = _FakeRunner(None)
+    no_rt = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot", headers=headers)
+    assert no_rt.status_code == 409
+    assert no_rt.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value
+
+    # Ended session -> 409 SESSION_INACTIVE
+    with factory() as db:
+        row = db.get(SessionModel, SESSION_ACTIVE)
+        assert row is not None
+        row.state = "ENDED"
+        db.commit()
+    holder["runner"] = _FakeRunner(_FakeRuntime(fake_jpeg))
+    ended = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot", headers=headers)
+    assert ended.status_code == 409
+    assert ended.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value

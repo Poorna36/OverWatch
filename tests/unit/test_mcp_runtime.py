@@ -812,3 +812,57 @@ def test_container_path_jail_validates_container_symlinks_without_host_root(
         assert len(client.exec_creates) == execs_before
     finally:
         runtime.close()
+
+
+def test_capture_screenshot_jpeg_lifecycle_and_validation() -> None:
+    """capture_screenshot_jpeg ensures display, validates JPEG bytes, and cleans up."""
+    fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\xff\xd9"
+    client = _FakeDockerClient()
+    # xset fails first (not running), then succeeds after Xvfb starts
+    client.probe_exit_codes["xset"] = [1, 0]
+
+    orig_exec_start = client._exec_start
+    capture_state = {"mode": "ok"}
+
+    def _custom_exec_start(exec_id: str, **kwargs: Any) -> Any:
+        rec = client._exec_records[exec_id]
+        if rec["cmd"][0] == "python3":
+            client.exec_starts.append({"exec_id": exec_id, **kwargs})
+            if capture_state["mode"] == "ok":
+                return fake_jpeg
+            if capture_state["mode"] == "bad_bytes":
+                return b"not-a-jpeg"
+            return b""
+        return orig_exec_start(exec_id, **kwargs)
+
+    client.api.exec_start.side_effect = _custom_exec_start
+    profile = load_profile("coding")
+    runtime = SessionMcpRuntime(
+        docker_client=client,
+        session_id=SESSION_ID,
+        profile=profile,
+    )
+    try:
+        frame = runtime.capture_screenshot_jpeg()
+        assert frame == fake_jpeg
+        cmds = [rec["cmd"][0] for rec in client.exec_creates]
+        assert "Xvfb" in cmds
+        assert "openbox" in cmds
+        assert "python3" in cmds
+
+        capture_state["mode"] = "bad_bytes"
+        with pytest.raises(McpTransportError, match="invalid JPEG"):
+            runtime.capture_screenshot_jpeg()
+
+        client.probe_exit_codes["python3"] = [1]
+        capture_state["mode"] = "ok"
+        with pytest.raises(McpTransportError, match="Screenshot capture failed"):
+            runtime.capture_screenshot_jpeg()
+    finally:
+        runtime.close()
+
+    kill_cmds = [rec["cmd"] for rec in client.exec_creates if rec["cmd"][0] == "kill"]
+    assert len(kill_cmds) == 2
+
+    with pytest.raises(McpRuntimeClosedError):
+        runtime.capture_screenshot_jpeg()
