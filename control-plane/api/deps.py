@@ -17,6 +17,13 @@ from control_plane.db.session import create_db_engine, create_session_factory, i
 from control_plane.events.event_bus import EventBus
 from control_plane.gateway.approval_manager import ApprovalManager
 from control_plane.gateway.policy_loader import PolicyLoader
+from control_plane.notifications.push import (
+    ExpoPushSender,
+    PushNotificationService,
+    PushSender,
+    PushTokenCipher,
+    PushTokenStore,
+)
 from control_plane.sessions.container_manager import SessionContainerManager
 from control_plane.sessions.docker_client import (
     create_docker_client,
@@ -127,12 +134,47 @@ def get_event_bus(
     return EventBus(session_factory)
 
 
+def get_stream_clock() -> Callable[[], datetime]:
+    """Return current UTC clock callable for token and session timestamps."""
+    return lambda: datetime.now(UTC)
+
+
+def get_push_token_store(
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    clock: Any = Depends(get_stream_clock),
+) -> PushTokenStore:
+    """Injectable encrypted PushTokenStore dependency."""
+    return PushTokenStore(
+        session_factory=session_factory,
+        cipher=PushTokenCipher(),
+        clock=clock,
+    )
+
+
+def get_push_sender() -> PushSender:
+    """Injectable PushSender dependency."""
+    return ExpoPushSender()
+
+
+def get_push_notification_service(
+    store: PushTokenStore = Depends(get_push_token_store),
+    sender: PushSender = Depends(get_push_sender),
+) -> PushNotificationService:
+    """Injectable PushNotificationService dependency."""
+    return PushNotificationService(store=store, sender=sender)
+
+
 def get_approval_manager(
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     event_bus: EventBus = Depends(get_event_bus),
+    push_service: PushNotificationService = Depends(get_push_notification_service),
 ) -> ApprovalManager:
     """Injectable ApprovalManager dependency."""
-    return ApprovalManager(session_factory=session_factory, event_bus=event_bus)
+    return ApprovalManager(
+        session_factory=session_factory,
+        event_bus=event_bus,
+        push_service=push_service,
+    )
 
 
 def get_profile_loader() -> ProfileLoader:
@@ -153,11 +195,6 @@ def _default_container_manager() -> SessionContainerManager:
 def get_container_manager() -> SessionContainerManager:
     """Injectable SessionContainerManager dependency."""
     return _default_container_manager()
-
-
-def get_stream_clock() -> Callable[[], datetime]:
-    """Return current UTC clock callable for token and session timestamps."""
-    return lambda: datetime.now(UTC)
 
 
 def get_llm_factory() -> Callable[[], LlmAdapter]:
@@ -181,6 +218,7 @@ def get_session_runner(
     llm_factory: Callable[[], LlmAdapter] = Depends(get_llm_factory),
     registry: RuntimeRegistry = Depends(get_runtime_registry),
     clock: Any = Depends(get_stream_clock),
+    push_service: PushNotificationService = Depends(get_push_notification_service),
 ) -> SessionRunner:
     """Injectable SessionRunner wired to request/override dependencies."""
     return SessionRunner(
@@ -193,4 +231,5 @@ def get_session_runner(
         llm_factory=llm_factory,
         clock=clock,
         registry=registry,
+        push_service=push_service,
     )

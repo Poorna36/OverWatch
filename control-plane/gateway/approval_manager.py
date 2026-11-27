@@ -24,6 +24,7 @@ Security & consistency guarantees:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
@@ -31,7 +32,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from control_plane.audit.audit_writer import (
     AuditWriterError,
@@ -58,6 +59,9 @@ from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+
+if TYPE_CHECKING:
+    from control_plane.notifications.push import PushNotificationService
 
 APPROVAL_ID_PREFIX = "a_"
 ULID_LENGTH = 26
@@ -248,6 +252,7 @@ class ApprovalManager:
         event_bus: EventBus,
         *,
         clock: Callable[[], datetime] | None = None,
+        push_service: PushNotificationService | None = None,
     ) -> None:
         if not callable(session_factory):
             raise TypeError("session_factory must be callable.")
@@ -256,6 +261,7 @@ class ApprovalManager:
         self._session_factory = session_factory
         self._event_bus = event_bus
         self._clock = (lambda: datetime.now(UTC)) if clock is None else clock
+        self._push_service = push_service
         self._write_lock = threading.Lock()
 
     def _current_utc(self, now: datetime | None) -> datetime:
@@ -347,12 +353,12 @@ class ApprovalManager:
             with self._session_factory() as db:
                 try:
                     _begin_immediate_if_sqlite(db)
-                    session_exists = db.scalar(
-                        select(SessionModel.session_id).where(
+                    owner_id = db.scalar(
+                        select(SessionModel.owner_id).where(
                             SessionModel.session_id == request.session_id
                         )
                     )
-                    if session_exists is None:
+                    if owner_id is None:
                         raise ApprovalManagerError(
                             f"Cannot create approval: session '{request.session_id}' "
                             "does not exist."
@@ -399,6 +405,13 @@ class ApprovalManager:
                 cause=exc,
                 committed_result=request,
             ) from exc
+
+        if self._push_service is not None:
+            with contextlib.suppress(Exception):
+                self._push_service.notify_approval_requested(
+                    owner_id=owner_id,
+                    approval=request,
+                )
 
         return ApprovalCreationResult(approval=request, event=event)
 

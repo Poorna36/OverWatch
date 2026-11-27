@@ -37,7 +37,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from control_plane.agent.llm import LlmAdapter, LlmAdapterError
 from control_plane.agent.loop import (
@@ -77,6 +77,9 @@ from control_plane.sessions.profile_loader import ProfileLoader, ProfileLoaderEr
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+
+if TYPE_CHECKING:
+    from control_plane.notifications.push import PushNotificationService
 
 SESSION_ID_PREFIX = "s_"
 _CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -253,6 +256,7 @@ class SessionRunner:
         prompts_base_dir: Path | str = REPO_ROOT,
         max_workers: int = 8,
         registry: RuntimeRegistry | None = None,
+        push_service: PushNotificationService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._container_manager = container_manager
@@ -264,6 +268,7 @@ class SessionRunner:
         self._llm_factory = llm_factory
         self._clock = (lambda: datetime.now(UTC)) if clock is None else clock
         self._prompts_base_dir = prompts_base_dir
+        self._push_service = push_service
 
         self._registry = (
             registry
@@ -481,6 +486,14 @@ class SessionRunner:
             if row is None:
                 return None
             return row.state  # type: ignore[return-value]
+
+    def _get_session_owner_id(self, session_id: str) -> str | None:
+        with contextlib.suppress(SQLAlchemyError):
+            with self._session_factory() as db:
+                row = db.get(SessionModel, session_id)
+                if row is not None:
+                    return row.owner_id
+        return None
 
     def _mark_failed_if_active(self, session_id: str, *, reason: str) -> bool:
         """Atomically transition ``ACTIVE -> FAILED`` and emit ``session_state``."""
@@ -751,6 +764,14 @@ class SessionRunner:
         )
         with self._lock:
             self._run_records[session_id] = record
+        if result.status == "completed" and self._push_service is not None:
+            owner_id = self._get_session_owner_id(session_id)
+            if owner_id is not None:
+                with contextlib.suppress(Exception):
+                    self._push_service.notify_session_completed(
+                        owner_id=owner_id,
+                        session_id=session_id,
+                    )
         return record
 
     def run_session_agent(
