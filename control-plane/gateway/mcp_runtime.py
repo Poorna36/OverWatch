@@ -489,6 +489,7 @@ class ContainerPathJail(PathJail):
 _MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
 _MAX_VIEW_ASSET_BYTES = 8 * 1024 * 1024
 DEFAULT_VIEW_WS_PORT = 6800
+MAX_VIEW_WS_FRAME_BYTES = 16 * 1024 * 1024
 _VIEW_WWW_ROOT = "/usr/share/kasmvnc/www"
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 _VIEW_ASSET_MIME_TYPES: dict[str, str] = {
@@ -688,6 +689,8 @@ class ViewWebSocketBridge:
                 (length,) = struct.unpack("!H", self._read_exact(2))
             elif length == 127:
                 (length,) = struct.unpack("!Q", self._read_exact(8))
+            if length > MAX_VIEW_WS_FRAME_BYTES:
+                raise McpTransportError("Upstream WebSocket frame exceeds size limit.")
             mask_key = self._read_exact(4) if masked else b""
             payload = self._read_exact(length) if length > 0 else b""
             if masked:
@@ -729,10 +732,17 @@ class ViewWebSocketBridge:
             if self._closed:
                 return
             self._closed = True
+            for target in (self._sock, getattr(self._sock, "_sock", None)):
+                if target is not None and hasattr(target, "shutdown"):
+                    with contextlib.suppress(OSError, ValueError):
+                        target.shutdown(socket.SHUT_RDWR)
+                    break
             with contextlib.suppress(Exception):
                 self._sock.close()
         if self._on_close is not None:
-            self._on_close(self)
+            callback = self._on_close
+            self._on_close = None
+            callback(self)
 
 
 class SessionMcpRuntime:
@@ -1123,9 +1133,14 @@ class SessionMcpRuntime:
             ) from exc
 
         sock = getattr(raw_sock, "_sock", raw_sock)
+
+        def _on_bridge_close(b: ViewWebSocketBridge) -> None:
+            with self._lock:
+                self._view_bridges.discard(b)
+
         bridge = ViewWebSocketBridge(
             sock=sock,
-            on_close=lambda b: self._view_bridges.discard(b),
+            on_close=_on_bridge_close,
         )
         try:
             bridge.handshake()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -71,6 +72,7 @@ _HTTP_SCHEME_MAP: dict[str, str] = {
     "https": "https",
 }
 _VIEW_COOKIE_NAME = "overwatch_view"
+_MAX_VIEW_WS_FRAME_BYTES = 16 * 1024 * 1024
 _VIEW_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
@@ -88,6 +90,45 @@ def get_public_view_base_url() -> str | None:
     """Return optional dedicated origin for live-view URLs."""
     raw = os.environ.get("PUBLIC_VIEW_BASE_URL")
     return raw if raw and raw.strip() else None
+
+
+def _view_origin_is_allowed(origin: str | None, public_base_url: str | None) -> bool:
+    """Require browser WebSockets to originate from the configured view origin."""
+    if not origin or not public_base_url:
+        return False
+    try:
+        supplied = urlsplit(origin)
+        configured = urlsplit(public_base_url)
+        if (
+            supplied.scheme.lower() not in {"http", "https"}
+            or supplied.username is not None
+            or supplied.password is not None
+            or supplied.path
+            or supplied.query
+            or supplied.fragment
+            or configured.scheme.lower() not in {"http", "https"}
+            or configured.username is not None
+            or configured.password is not None
+            or not configured.hostname
+        ):
+            return False
+        supplied_port = supplied.port
+        configured_port = configured.port
+    except ValueError:
+        return False
+
+    def _effective_port(scheme: str, port: int | None) -> int | None:
+        if port is not None:
+            return port
+        return 443 if scheme.lower() == "https" else 80
+
+    return (
+        supplied.hostname is not None
+        and supplied.scheme.lower() == configured.scheme.lower()
+        and supplied.hostname.lower() == configured.hostname.lower()
+        and _effective_port(supplied.scheme, supplied_port)
+        == _effective_port(configured.scheme, configured_port)
+    )
 
 
 def _build_public_session_url(
@@ -1049,6 +1090,7 @@ async def get_session_view_entry(
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     session_runner: SessionRunner = Depends(get_session_runner),
     configured_token: str | None = Depends(get_app_token),
+    public_base_url: str | None = Depends(get_public_base_url),
     clock: Callable[[], datetime] = Depends(get_stream_clock),
 ) -> RedirectResponse:
     """Exchange a view-scoped query token for a path-scoped HttpOnly view cookie."""
@@ -1073,6 +1115,8 @@ async def get_session_view_entry(
         status_code=status.HTTP_302_FOUND,
         headers={"Cache-Control": "no-store"},
     )
+    cookie_base_url = get_public_view_base_url() or public_base_url or ""
+    cookie_scheme = urlsplit(cookie_base_url).scheme or request.url.scheme
     response.set_cookie(
         key=_VIEW_COOKIE_NAME,
         value=raw_token,
@@ -1080,7 +1124,7 @@ async def get_session_view_entry(
         path=f"/api/v1/sessions/{session_id}/view",
         httponly=True,
         samesite="strict",
-        secure=request.url.scheme == "https",
+        secure=cookie_scheme.lower() == "https",
     )
     return response
 
@@ -1141,9 +1185,15 @@ async def session_view_websockify(
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     session_runner: SessionRunner = Depends(get_session_runner),
     configured_token: str | None = Depends(get_app_token),
+    public_base_url: str | None = Depends(get_public_base_url),
     clock: Callable[[], datetime] = Depends(get_stream_clock),
 ) -> None:
     """Proxy authenticated KasmVNC WebSocket traffic over docker-exec."""
+    view_base_url = get_public_view_base_url() or public_base_url
+    if not _view_origin_is_allowed(websocket.headers.get("origin"), view_base_url):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     try:
         _, _, runtime = await anyio.to_thread.run_sync(
             partial(
@@ -1173,43 +1223,64 @@ async def session_view_websockify(
 
     async def _pump_upstream_to_client() -> None:
         while True:
-            frame = await anyio.to_thread.run_sync(bridge.recv_frame)
+            try:
+                frame = await anyio.to_thread.run_sync(bridge.recv_frame)
+            except (McpRuntimeError, Exception):
+                with contextlib.suppress(Exception):
+                    await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+                break
+            except asyncio.CancelledError:
+                break
             if frame is None:
                 break
             opcode, data = frame
-            if opcode == 0x1:
-                await websocket.send_text(data.decode("utf-8", errors="replace"))
-            else:
-                await websocket.send_bytes(data)
+            try:
+                if opcode == 0x1:
+                    await websocket.send_text(data.decode("utf-8", errors="replace"))
+                else:
+                    await websocket.send_bytes(data)
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                break
 
     async def _pump_client_to_upstream() -> None:
         while True:
-            message = await websocket.receive()
+            try:
+                message = await websocket.receive()
+            except (WebSocketDisconnect, asyncio.CancelledError):
+                break
             msg_type = message.get("type")
             if msg_type == "websocket.disconnect":
                 break
             if message.get("bytes") is not None:
-                await anyio.to_thread.run_sync(bridge.send_frame, 0x2, message["bytes"])
+                payload = message["bytes"]
+                if len(payload) > _MAX_VIEW_WS_FRAME_BYTES:
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+                    break
+                await anyio.to_thread.run_sync(bridge.send_frame, 0x2, payload)
             elif message.get("text") is not None:
-                await anyio.to_thread.run_sync(
-                    bridge.send_frame, 0x1, message["text"].encode("utf-8")
-                )
+                payload = message["text"].encode("utf-8")
+                if len(payload) > _MAX_VIEW_WS_FRAME_BYTES:
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
+                    break
+                await anyio.to_thread.run_sync(bridge.send_frame, 0x1, payload)
 
     upstream_task = asyncio.create_task(_pump_upstream_to_client())
     client_task = asyncio.create_task(_pump_client_to_upstream())
     try:
-        _, pending = await asyncio.wait(
-            {upstream_task, client_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
-    except WebSocketDisconnect:
-        pass
+        try:
+            await asyncio.wait(
+                {upstream_task, client_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except (WebSocketDisconnect, asyncio.CancelledError):
+            pass
     finally:
-        for task in (upstream_task, client_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
-        await anyio.to_thread.run_sync(bridge.close)
+        with anyio.CancelScope(shield=True):
+            with contextlib.suppress(BaseException):
+                await anyio.to_thread.run_sync(bridge.close)
+            for task in (upstream_task, client_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(upstream_task, client_task, return_exceptions=True)
