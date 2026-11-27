@@ -19,7 +19,8 @@ from control_plane.agent import (
     run_session_loop,
 )
 from control_plane.audit.audit_writer import AuditWriter
-from control_plane.contracts import ErrorCode, Policy, Profile
+from control_plane.audit.verify_audit import verify_session_audit
+from control_plane.contracts import ApprovalResponse, ErrorCode, Policy, Profile
 from control_plane.db.models import (
     ApprovalModel,
     AuditEntryModel,
@@ -412,3 +413,268 @@ def test_inactive_session_and_adapter_exhaustion_fail_safely(loop_env: dict) -> 
     assert r_exhausted.status == "error"
     assert r_exhausted.error is not None
     assert r_exhausted.error.code == ErrorCode.UPSTREAM_ERROR
+
+
+def test_resume_after_approval_executes_once_and_completes_remaining_calls(
+    loop_env: dict,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Approved continuation revalidates, runs once, finishes batch, and completes."""
+    adapter = ScriptedLlmAdapter(
+        [
+            LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="call_ask_1",
+                        tool="terminal.run",
+                        args={"command": "curl https://pypi.org/simple/"},
+                    ),
+                    LlmToolCall(
+                        call_id="call_after_2",
+                        tool="files.write",
+                        args={"path": "after.txt", "content": "secret-file-body"},
+                    ),
+                )
+            ),
+            lambda _sys, msgs, _tools: (
+                LlmTurnResponse(assistant_text="All done after approval.")
+                if any(
+                    m.role == "tool" and m.tool_call_id == "call_ask_1" for m in msgs
+                )
+                and any(
+                    m.role == "tool" and m.tool_call_id == "call_after_2" for m in msgs
+                )
+                else LlmTurnResponse(assistant_text="Missing tool results")
+            ),
+        ]
+    )
+    executed: list[ValidatedArguments] = []
+
+    def fake_executor(validated: ValidatedArguments) -> dict:
+        executed.append(validated)
+        if validated.tool == "terminal.run":
+            return {"exit_code": 0, "stdout": "curl ok", "stderr": ""}
+        return {"bytes": 16}
+
+    loop = AgentLoop(
+        llm=adapter,
+        coordinator=loop_env["coordinator"],
+        approval_manager=loop_env["approval_manager"],
+        event_bus=loop_env["event_bus"],
+        policy=loop_env["policy"],
+        profile=loop_env["profile"],
+        workspace_root=loop_env["workspace"],
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        paused = loop.run(
+            session_id=SESSION_ID,
+            request_text=UNIQUE_REQUEST_SECRET,
+            executor=fake_executor,
+        )
+        assert paused.status == "awaiting_approval"
+        assert paused.pending_approval is not None
+        assert paused.continuation is not None
+        assert UNIQUE_REQUEST_SECRET not in repr(paused)
+        assert UNIQUE_REQUEST_SECRET not in repr(paused.continuation)
+        assert "curl https://pypi.org/simple/" not in repr(paused.continuation)
+        assert executed == []
+
+        resolved = loop_env["approval_manager"].resolve_approval(
+            ApprovalResponse(
+                approval_id=paused.pending_approval.approval_id,
+                approve=True,
+            )
+        )
+        resumed = loop.resume_after_approval(
+            continuation=paused.continuation,
+            approved=resolved.approved,
+            timed_out=resolved.timed_out,
+            executor=fake_executor,
+        )
+
+    assert resumed.status == "completed"
+    assert resumed.assistant_message == "All done after approval."
+    assert resumed.calls_used == 2
+    assert [c.tool for c in executed] == ["terminal.run", "files.write"]
+    assert executed[0].args["command"] == "curl https://pypi.org/simple/"
+
+    assert UNIQUE_REQUEST_SECRET not in caplog.text
+    with loop_env["factory"]() as db:
+        assert verify_session_audit(db, SESSION_ID).valid is True
+        audits = db.scalars(
+            select(AuditEntryModel)
+            .where(AuditEntryModel.session_id == SESSION_ID)
+            .order_by(AuditEntryModel.seq.asc())
+        ).all()
+        assert [(a.tool, a.decision) for a in audits] == [
+            ("terminal.run", "asked"),
+            ("terminal.run", "asked_approved"),
+            ("files.write", "allowed"),
+        ]
+        for a in audits:
+            assert UNIQUE_REQUEST_SECRET not in a.args_redacted
+            assert "secret-file-body" not in a.args_redacted
+
+
+def test_resume_after_denial_and_timeout_never_execute_tool(loop_env: dict) -> None:
+    """Denied or timed-out approvals emit tool_result errors and resume safely."""
+    for is_timeout, expected_code in [
+        (False, ErrorCode.USER_DENIED),
+        (True, ErrorCode.APPROVAL_TIMEOUT),
+    ]:
+        seen_tool_contents: list[str] = []
+
+        def _turn2(_sys, msgs, _tools) -> LlmTurnResponse:
+            seen_tool_contents.append(msgs[-1].content)
+            return LlmTurnResponse(assistant_text=f"Handled {expected_code.value}.")
+
+        adapter = ScriptedLlmAdapter(
+            [
+                LlmTurnResponse(
+                    tool_calls=(
+                        LlmToolCall(
+                            call_id=f"call_{expected_code.value}",
+                            tool="terminal.run",
+                            args={"command": "curl https://example.com"},
+                        ),
+                    )
+                ),
+                _turn2,
+            ]
+        )
+        mock_executor = MagicMock()
+        loop = AgentLoop(
+            llm=adapter,
+            coordinator=loop_env["coordinator"],
+            approval_manager=loop_env["approval_manager"],
+            event_bus=loop_env["event_bus"],
+            policy=loop_env["policy"],
+            profile=loop_env["profile"],
+            workspace_root=loop_env["workspace"],
+        )
+
+        paused = loop.run(
+            session_id=SESSION_ID,
+            request_text="fetch data",
+            executor=mock_executor,
+        )
+        assert paused.continuation is not None
+
+        resumed = loop.resume_after_approval(
+            continuation=paused.continuation,
+            approved=False,
+            timed_out=is_timeout,
+            executor=mock_executor,
+        )
+
+        mock_executor.assert_not_called()
+        assert resumed.status == "completed"
+        assert resumed.assistant_message == f"Handled {expected_code.value}."
+        assert len(seen_tool_contents) == 1
+        assert expected_code.value in seen_tool_contents[0]
+
+
+def test_resume_revalidates_edited_args_and_post_approval_preflight_blocks(
+    loop_env: dict,
+) -> None:
+    """Edited args and workspace drift pass through gateway preflight before exec."""
+    ws: Path = loop_env["workspace"]
+    target = ws / "delete_me.txt"
+    target.write_text("hi", encoding="utf-8")
+
+    # 1. Symlink created after 'ask' must block during post-approval preflight
+    adapter1 = ScriptedLlmAdapter(
+        [
+            LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_del",
+                        tool="files.delete",
+                        args={"path": "delete_me.txt"},
+                    ),
+                )
+            ),
+        ]
+    )
+    mock_exec = MagicMock()
+    loop1 = AgentLoop(
+        llm=adapter1,
+        coordinator=loop_env["coordinator"],
+        approval_manager=loop_env["approval_manager"],
+        event_bus=loop_env["event_bus"],
+        policy=loop_env["policy"],
+        profile=loop_env["profile"],
+        workspace_root=ws,
+    )
+    paused1 = loop1.run(
+        session_id=SESSION_ID, request_text="rm file", executor=mock_exec
+    )
+    assert paused1.continuation is not None
+
+    outside = ws.parent / "host_secret.txt"
+    outside.write_text("secret", encoding="utf-8")
+    target.unlink()
+    target.symlink_to(outside)
+
+    blocked_res = loop1.resume_after_approval(
+        continuation=paused1.continuation,
+        approved=True,
+        executor=mock_exec,
+    )
+    mock_exec.assert_not_called()
+    assert blocked_res.status == "blocked"
+    assert blocked_res.error is not None
+    assert blocked_res.error.code == ErrorCode.PATH_JAIL
+
+    # 2. Unsafe edited_args (deny pattern) is blocked before execution
+    adapter2 = ScriptedLlmAdapter(
+        [
+            LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_term",
+                        tool="terminal.run",
+                        args={"command": "curl https://pypi.org/simple/"},
+                    ),
+                )
+            ),
+            LlmTurnResponse(assistant_text="Safe edited command ran."),
+        ]
+    )
+    loop2 = AgentLoop(
+        llm=adapter2,
+        coordinator=loop_env["coordinator"],
+        approval_manager=loop_env["approval_manager"],
+        event_bus=loop_env["event_bus"],
+        policy=loop_env["policy"],
+        profile=loop_env["profile"],
+        workspace_root=ws,
+    )
+    paused2 = loop2.run(
+        session_id=SESSION_ID, request_text="run cmd", executor=mock_exec
+    )
+    assert paused2.continuation is not None
+
+    bad_edit_res = loop2.resume_after_approval(
+        continuation=paused2.continuation,
+        approved=True,
+        edited_args={"command": "rm -rf /workspace"},
+        executor=mock_exec,
+    )
+    mock_exec.assert_not_called()
+    assert bad_edit_res.status == "blocked"
+    assert bad_edit_res.error is not None
+    assert bad_edit_res.error.code == ErrorCode.DENY_PATTERN
+
+    # 3. Valid edited_args re-enters preflight/validation and executes normalized args
+    ran: list[ValidatedArguments] = []
+    good_edit_res = loop2.resume_after_approval(
+        continuation=paused2.continuation,
+        approved=True,
+        edited_args={"command": "echo safe-edited"},
+        executor=lambda v: (ran.append(v), {"exit_code": 0, "stdout": "ok"})[1],
+    )
+    assert good_edit_res.status == "completed"
+    assert len(ran) == 1
+    assert ran[0].args == {"command": "echo safe-edited"}

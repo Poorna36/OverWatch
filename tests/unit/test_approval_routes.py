@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from control_plane.api.deps import (
     derive_owner_id,
     get_approval_manager,
     get_session_factory,
+    get_session_runner,
 )
 from control_plane.api.main import app
+from control_plane.audit import audit_writer
+from control_plane.audit.audit_writer import AuditWriterError
 from control_plane.contracts import ErrorCode, Policy
-from control_plane.db.models import SessionModel
+from control_plane.db.models import ApprovalModel, EventModel, SessionModel
 from control_plane.db.session import create_db_engine, create_session_factory, init_db
-from control_plane.events.event_bus import EventBus
+from control_plane.events.event_bus import EventBus, EventBusError
 from control_plane.gateway.approval_manager import ApprovalManager
 from control_plane.gateway.pipeline import PendingApprovalData
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 TEST_TOKEN = "test-demo-app-token"
 SESSION_OWNED = "s_01ABCDEFGHJKMNPTVW12345678"
@@ -329,3 +335,99 @@ def test_post_expired_approval_returns_approval_timeout(api_env) -> None:
     )
     assert r_again.status_code == 409
     assert r_again.json()["error"]["code"] == ErrorCode.APPROVAL_TIMEOUT
+
+
+def test_post_rejects_extra_edited_args_and_ended_session(api_env) -> None:
+    """Contract rejects unmodeled edited_args and ended sessions fail closed."""
+    client: TestClient = api_env["client"]
+    manager: ApprovalManager = api_env["manager"]
+    factory = api_env["factory"]
+    headers = api_env["headers"]
+
+    aid = _create_pending(manager)
+
+    # Extra fields (such as uncontracted edited_args) fail schema validation (422)
+    r_extra = client.post(
+        f"/api/v1/sessions/{SESSION_OWNED}/approvals/{aid}",
+        json={"approval_id": aid, "approve": True, "edited_args": {"path": "x"}},
+        headers=headers,
+    )
+    assert r_extra.status_code == 422
+
+    # Terminal session state rejects approval resolution without resuming
+    with factory() as db:
+        row = db.get(SessionModel, SESSION_OWNED)
+        assert row is not None
+        row.state = "ENDED"
+        db.commit()
+
+    r_ended = client.post(
+        f"/api/v1/sessions/{SESSION_OWNED}/approvals/{aid}",
+        json={"approval_id": aid, "approve": True},
+        headers=headers,
+    )
+    assert r_ended.status_code == 409
+    assert r_ended.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE
+
+
+def test_audit_or_event_persistence_failure_blocks_resumption(
+    api_env,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Audit or event failure during resolution prevents SessionRunner resumption."""
+    client: TestClient = api_env["client"]
+    manager: ApprovalManager = api_env["manager"]
+    factory = api_env["factory"]
+    headers = api_env["headers"]
+
+    aid = _create_pending(manager)
+    resumed_calls: list[Any] = []
+
+    class _SpyRunner:
+        def on_approval_resolved(self, resolution: Any) -> None:
+            resumed_calls.append(resolution)
+
+    app.dependency_overrides[get_session_runner] = lambda: _SpyRunner()
+
+    # 1. Audit persistence failure rolls back approval and never resumes
+    def _fail_audit(*_args: Any, **_kwargs: Any):
+        raise AuditWriterError("simulated audit failure")
+
+    monkeypatch.setattr(
+        "control_plane.gateway.approval_manager.append_audit_entry",
+        _fail_audit,
+    )
+    r_audit_fail = client.post(
+        f"/api/v1/sessions/{SESSION_OWNED}/approvals/{aid}",
+        json={"approval_id": aid, "approve": True},
+        headers=headers,
+    )
+    assert r_audit_fail.status_code == 500
+    assert resumed_calls == []
+    with factory() as db:
+        row = db.get(ApprovalModel, aid)
+        assert row is not None and row.status == "pending"
+
+    # 2. EventBus publish failure after DB commit returns 500 and never resumes
+    monkeypatch.setattr(
+        "control_plane.gateway.approval_manager.append_audit_entry",
+        audit_writer.append_audit_entry,
+    )
+
+    def _fail_publish(**_kwargs: Any):
+        raise EventBusError("simulated event bus failure")
+
+    monkeypatch.setattr(api_env["bus"], "publish", _fail_publish)
+    r_event_fail = client.post(
+        f"/api/v1/sessions/{SESSION_OWNED}/approvals/{aid}",
+        json={"approval_id": aid, "approve": True},
+        headers=headers,
+    )
+    assert r_event_fail.status_code == 500
+    assert resumed_calls == []
+    with factory() as db:
+        events = db.scalars(
+            select(EventModel).where(EventModel.session_id == SESSION_OWNED)
+        ).all()
+        assert [e.type for e in events] == ["approval_request"]
+        assert json.loads(events[0].data)["approval_id"] == aid

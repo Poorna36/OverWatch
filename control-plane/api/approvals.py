@@ -14,6 +14,7 @@ from control_plane.api.deps import (
     ApiError,
     get_approval_manager,
     get_session_factory,
+    get_session_runner,
     require_owner_id,
 )
 from control_plane.contracts import ApprovalRequest, ApprovalResponse, ErrorCode
@@ -27,6 +28,7 @@ from control_plane.gateway.approval_manager import (
     InvalidApprovalIdError,
     validate_approval_id,
 )
+from control_plane.sessions.session_runner import SessionRunner, SessionRunnerError
 from fastapi import APIRouter, Depends, Query
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -39,17 +41,18 @@ def _require_owned_session(
     session_factory: sessionmaker[Session],
     session_id: str,
     owner_id: str,
-) -> None:
+) -> str:
     """Verify ``session_id`` exists and belongs to ``owner_id`` without leaking."""
     with session_factory() as db:
-        found = db.scalar(
-            select(SessionModel.session_id).where(
+        state = db.scalar(
+            select(SessionModel.state).where(
                 SessionModel.session_id == session_id,
                 SessionModel.owner_id == owner_id,
             )
         )
-    if found is None:
+    if state is None:
         raise ApiError(404, ErrorCode.SESSION_INACTIVE, "Session not found.")
+    return state
 
 
 def _row_to_approval_request(row: ApprovalModel) -> ApprovalRequest:
@@ -86,12 +89,13 @@ def list_session_approvals(
     owner_id: str = Depends(require_owner_id),
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     approval_manager: ApprovalManager = Depends(get_approval_manager),
+    session_runner: SessionRunner = Depends(get_session_runner),
 ) -> dict[str, list[dict[str, Any]]]:
     """List approvals for an owned session, expiring any due approvals first."""
     _require_owned_session(session_factory, session_id, owner_id)
 
     try:
-        approval_manager.expire_due(session_id=session_id)
+        expired = approval_manager.expire_due(session_id=session_id)
     except ApprovalEventPublishError as exc:
         raise ApiError(
             500,
@@ -100,6 +104,12 @@ def list_session_approvals(
         ) from exc
     except ApprovalManagerError as exc:
         raise ApiError(500, ErrorCode.UPSTREAM_ERROR, str(exc)) from exc
+
+    for resolved in expired:
+        try:
+            session_runner.on_approval_resolved(resolved)
+        except SessionRunnerError:
+            pass
 
     with session_factory() as db:
         stmt = (
@@ -123,9 +133,10 @@ def resolve_session_approval(
     owner_id: str = Depends(require_owner_id),
     session_factory: sessionmaker[Session] = Depends(get_session_factory),
     approval_manager: ApprovalManager = Depends(get_approval_manager),
+    session_runner: SessionRunner = Depends(get_session_runner),
 ) -> dict[str, bool]:
     """Approve or deny a pending approval belonging to an owned session."""
-    _require_owned_session(session_factory, session_id, owner_id)
+    session_state = _require_owned_session(session_factory, session_id, owner_id)
 
     try:
         canonical_path_id = validate_approval_id(approval_id)
@@ -148,6 +159,13 @@ def resolve_session_approval(
 
     if existing.session_id != session_id:
         raise ApiError(404, ErrorCode.POLICY_BLOCK, "Approval not found.")
+
+    if session_state in ("ENDING", "ENDED", "FAILED"):
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session is not active (state: {session_state}).",
+        )
 
     try:
         result = approval_manager.resolve_approval(
@@ -178,6 +196,11 @@ def resolve_session_approval(
         ) from exc
     except ApprovalManagerError as exc:
         raise ApiError(500, ErrorCode.UPSTREAM_ERROR, str(exc)) from exc
+
+    try:
+        session_runner.on_approval_resolved(result)
+    except SessionRunnerError as exc:
+        raise ApiError(409, exc.code, str(exc)) from exc
 
     if result.timed_out:
         raise ApiError(

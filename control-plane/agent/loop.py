@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -45,14 +45,21 @@ from control_plane.gateway.approval_manager import (
 )
 from control_plane.gateway.argument_validation import (
     _TOOL_ARG_MODELS,
+    ArgumentValidationError,
     ValidatedArguments,
+    validate_tool_arguments,
 )
 from control_plane.gateway.coordinator import (
     AuditedCallResult,
     AuditedGatewayCoordinator,
     GatewayCoordinatorError,
 )
-from control_plane.gateway.path_jail import DEFAULT_WORKSPACE_ROOT
+from control_plane.gateway.path_jail import (
+    DEFAULT_WORKSPACE_ROOT,
+    PathJail,
+    PathJailError,
+)
+from control_plane.gateway.pipeline import PreflightRejectedError, execute_if_allowed
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,6 +77,35 @@ class AgentLoopError(Exception):
 
 
 @dataclass(frozen=True)
+class PendingApprovalContinuation:
+    """In-memory-only agent state needed to resume after approval resolution.
+
+    Never persisted to SQLite, audit entries, events, or logs because
+    ``messages`` retains raw ``request_text`` and ``pending_call`` retains
+    unredacted tool arguments.
+    """
+
+    session_id: str
+    approval_id: str
+    pending_call: ToolCall
+    system_prompt: str
+    tools: tuple[ToolDefinition, ...]
+    messages: tuple[LlmMessage, ...]
+    remaining_tool_calls: tuple[LlmToolCall, ...]
+    calls_used: int
+    calls_max: int
+    turns: int
+    audit_seqs: tuple[int, ...] = field(default_factory=tuple)
+
+    def __repr__(self) -> str:
+        return (
+            f"PendingApprovalContinuation(session_id={self.session_id!r}, "
+            f"approval_id={self.approval_id!r}, tool={self.pending_call.tool!r}, "
+            f"calls_used={self.calls_used}, turns={self.turns})"
+        )
+
+
+@dataclass(frozen=True)
 class AgentLoopResult:
     """Structured outcome returned after one agent loop execution stops."""
 
@@ -82,6 +118,9 @@ class AgentLoopResult:
     calls_max: int = 0
     turns: int = 0
     audit_seqs: tuple[int, ...] = field(default_factory=tuple)
+    continuation: PendingApprovalContinuation | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def build_allowed_tools(profile: Profile, policy: Policy) -> list[ToolDefinition]:
@@ -229,6 +268,9 @@ class AgentLoop:
         executor: Callable[[ValidatedArguments], Any],
         session_state: SessionState = "ACTIVE",
         initial_calls_used: int = 0,
+        on_approval_created: (
+            Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
+        ) = None,
     ) -> AgentLoopResult:
         """Run turns until completion, block, ask (awaiting approval), or budget."""
         if not isinstance(request_text, str) or not request_text.strip():
@@ -258,8 +300,8 @@ class AgentLoop:
         system_prompt = load_role_system_prompt(
             self._profile, base_dir=self._prompts_base_dir
         )
-        tools: Sequence[ToolDefinition] = build_allowed_tools(
-            self._profile, self._policy
+        tools: tuple[ToolDefinition, ...] = tuple(
+            build_allowed_tools(self._profile, self._policy)
         )
         calls_max = self._profile.budget.max_tool_calls
         calls_used = initial_calls_used
@@ -268,6 +310,487 @@ class AgentLoop:
 
         # request_text lives solely in this ephemeral in-memory message list.
         messages: list[LlmMessage] = [LlmMessage(role="user", content=request_text)]
+
+        return self._run_from_state(
+            session_id=session_id,
+            system_prompt=system_prompt,
+            tools=tools,
+            messages=messages,
+            executor=executor,
+            session_state=session_state,
+            calls_used=calls_used,
+            calls_max=calls_max,
+            turns=turns,
+            audit_seqs=audit_seqs,
+            on_approval_created=on_approval_created,
+        )
+
+    def resume_after_approval(
+        self,
+        *,
+        continuation: PendingApprovalContinuation,
+        approved: bool,
+        executor: Callable[[ValidatedArguments], Any],
+        timed_out: bool = False,
+        session_state: SessionState = "ACTIVE",
+        edited_args: Mapping[str, Any] | None = None,
+        on_approval_created: (
+            Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
+        ) = None,
+    ) -> AgentLoopResult:
+        """Resume a paused ``AgentLoop`` after an approval resolution."""
+        session_id = continuation.session_id
+        call = continuation.pending_call
+        messages = list(continuation.messages)
+        audit_seqs = list(continuation.audit_seqs)
+        calls_used = continuation.calls_used
+        calls_max = continuation.calls_max
+        turns = continuation.turns
+
+        if not approved or timed_out:
+            code = ErrorCode.APPROVAL_TIMEOUT if timed_out else ErrorCode.USER_DENIED
+            msg = (
+                f"Approval timed out for tool '{call.tool}'."
+                if timed_out
+                else f"User denied approval for tool '{call.tool}'."
+            )
+            err = ErrorBody(
+                code=code,
+                message=msg,
+                details={"tool": call.tool, "approval_id": continuation.approval_id},
+            )
+            try:
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": False,
+                        "error": err.model_dump(),
+                        "duration_ms": 0.0,
+                    },
+                )
+            except EventBusError as exc:
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="error",
+                    error=ErrorBody(
+                        code=ErrorCode.UPSTREAM_ERROR,
+                        message=f"Failed to publish tool_result event: {exc}",
+                    ),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
+            if session_state != "ACTIVE":
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="blocked",
+                    error=ErrorBody(
+                        code=ErrorCode.SESSION_INACTIVE,
+                        message=f"Session is not ACTIVE (state: {session_state}).",
+                    ),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
+            messages.append(
+                LlmMessage(
+                    role="tool",
+                    content=_bound_tool_result_text(
+                        {
+                            "ok": False,
+                            "decision": "asked_denied",
+                            "error": err.model_dump(),
+                        },
+                        self._policy.defaults.output_cap_bytes,
+                    ),
+                    tool_call_id=call.call_id,
+                    tool_name=call.tool,
+                )
+            )
+            return self._run_from_state(
+                session_id=session_id,
+                system_prompt=continuation.system_prompt,
+                tools=continuation.tools,
+                messages=messages,
+                executor=executor,
+                session_state=session_state,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=audit_seqs,
+                pending_tool_calls=continuation.remaining_tool_calls,
+                on_approval_created=on_approval_created,
+            )
+
+        if edited_args is not None:
+            if not isinstance(edited_args, Mapping):
+                err = ErrorBody(
+                    code=ErrorCode.ARG_INVALID,
+                    message="Edited tool arguments must be a mapping.",
+                    details={"tool": call.tool},
+                )
+                return self._record_post_approval_block(
+                    session_id=session_id,
+                    call=call,
+                    args_redacted={},
+                    tier=None,
+                    err=err,
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=audit_seqs,
+                )
+            candidate_call = ToolCall(
+                session_id=call.session_id,
+                call_id=call.call_id,
+                tool=call.tool,
+                args=dict(edited_args),
+            )
+        else:
+            candidate_call = call
+
+        try:
+            preflight = self._coordinator.pipeline.evaluate(
+                candidate_call,
+                self._profile,
+                session_state=session_state,
+                workspace_root=self._workspace_root,
+            )
+        except Exception as exc:
+            return AgentLoopResult(
+                session_id=session_id,
+                status="error",
+                error=ErrorBody(
+                    code=ErrorCode.FATAL,
+                    message=f"Gateway preflight revalidation failed: {exc}",
+                ),
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=tuple(audit_seqs),
+            )
+
+        if preflight.decision == "block":
+            err = preflight.error or ErrorBody(
+                code=ErrorCode.POLICY_BLOCK,
+                message=preflight.reason or "Blocked by gateway policy.",
+                details={"tool": candidate_call.tool},
+            )
+            return self._record_post_approval_block(
+                session_id=session_id,
+                call=candidate_call,
+                args_redacted=preflight.args_redacted,
+                tier=preflight.tier,
+                err=err,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=audit_seqs,
+            )
+
+        if preflight.decision not in ("allow", "ask"):
+            err = ErrorBody(
+                code=ErrorCode.POLICY_BLOCK,
+                message=f"Unexpected preflight decision {preflight.decision!r}.",
+                details={"tool": candidate_call.tool},
+            )
+            return self._record_post_approval_block(
+                session_id=session_id,
+                call=candidate_call,
+                args_redacted=preflight.args_redacted,
+                tier=preflight.tier,
+                err=err,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=audit_seqs,
+            )
+
+        validated_args: ValidatedArguments | None = None
+        if preflight.decision == "ask":
+            pipeline_jail = getattr(self._coordinator.pipeline, "path_jail", None)
+            try:
+                jail = (
+                    pipeline_jail
+                    if pipeline_jail is not None
+                    else PathJail(self._workspace_root)
+                )
+                validated_args = validate_tool_arguments(
+                    tool=candidate_call.tool,
+                    args=candidate_call.args,
+                    tool_policy=preflight.tool_policy,
+                    path_jail=jail,
+                )
+            except (PathJailError, ArgumentValidationError) as exc:
+                return self._record_post_approval_block(
+                    session_id=session_id,
+                    call=candidate_call,
+                    args_redacted=preflight.args_redacted,
+                    tier=preflight.tier,
+                    err=exc.to_error_body(),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=audit_seqs,
+                )
+
+        if edited_args is not None:
+            try:
+                audit_entry = self._coordinator.audit_writer.append(
+                    session_id=preflight.session_id,
+                    tool=preflight.tool,
+                    args=preflight.args_redacted,
+                    decision="asked_approved",
+                    reason="approved edited arguments passed preflight",
+                    tier=preflight.tier,
+                )
+                audit_seqs.append(audit_entry.seq)
+            except AuditWriterError as exc:
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="error",
+                    error=ErrorBody(
+                        code=ErrorCode.FATAL,
+                        message=f"Gateway audit persistence failed: {exc}",
+                    ),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
+        start_ns = time.monotonic_ns()
+        try:
+            if preflight.decision == "allow":
+                output = execute_if_allowed(preflight, executor)
+            else:
+                assert validated_args is not None
+                output = executor(validated_args)
+        except PreflightRejectedError as exc:
+            return self._record_post_approval_block(
+                session_id=session_id,
+                call=candidate_call,
+                args_redacted=preflight.args_redacted,
+                tier=preflight.tier,
+                err=exc.error,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=audit_seqs,
+            )
+        except Exception as exc:
+            exec_error = ErrorBody(
+                code=ErrorCode.UPSTREAM_ERROR,
+                message=f"Tool execution failed: {exc}",
+            )
+            duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
+            try:
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": candidate_call.call_id,
+                        "ok": False,
+                        "error": exec_error.model_dump(),
+                        "duration_ms": duration_ms,
+                    },
+                )
+            except EventBusError:
+                pass
+            return AgentLoopResult(
+                session_id=session_id,
+                status="error",
+                error=exec_error,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=tuple(audit_seqs),
+            )
+
+        duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
+        bounded_text = _bound_tool_result_text(
+            output,
+            self._policy.defaults.output_cap_bytes,
+        )
+        try:
+            _emit_event(
+                self._event_bus,
+                session_id=session_id,
+                event_type="tool_result",
+                data={
+                    "call_id": candidate_call.call_id,
+                    "ok": True,
+                    "duration_ms": duration_ms,
+                },
+            )
+        except EventBusError as exc:
+            return AgentLoopResult(
+                session_id=session_id,
+                status="error",
+                error=ErrorBody(
+                    code=ErrorCode.UPSTREAM_ERROR,
+                    message=f"Failed to publish tool_result event: {exc}",
+                ),
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=tuple(audit_seqs),
+            )
+
+        messages.append(
+            LlmMessage(
+                role="tool",
+                content=bounded_text,
+                tool_call_id=candidate_call.call_id,
+                tool_name=candidate_call.tool,
+            )
+        )
+        return self._run_from_state(
+            session_id=session_id,
+            system_prompt=continuation.system_prompt,
+            tools=continuation.tools,
+            messages=messages,
+            executor=executor,
+            session_state=session_state,
+            calls_used=calls_used,
+            calls_max=calls_max,
+            turns=turns,
+            audit_seqs=audit_seqs,
+            pending_tool_calls=continuation.remaining_tool_calls,
+            on_approval_created=on_approval_created,
+        )
+
+    def _record_post_approval_block(
+        self,
+        *,
+        session_id: str,
+        call: ToolCall,
+        args_redacted: dict[str, Any],
+        tier: Any,
+        err: ErrorBody,
+        calls_used: int,
+        calls_max: int,
+        turns: int,
+        audit_seqs: list[int],
+    ) -> AgentLoopResult:
+        """Audit and emit events when an approved call fails preflight recheck."""
+        try:
+            audit_entry = self._coordinator.audit_writer.append(
+                session_id=session_id,
+                tool=call.tool,
+                args=args_redacted,
+                decision="blocked",
+                reason=err.message or err.code,
+                tier=tier,
+            )
+            audit_seqs.append(audit_entry.seq)
+        except AuditWriterError as exc:
+            return AgentLoopResult(
+                session_id=session_id,
+                status="error",
+                error=ErrorBody(
+                    code=ErrorCode.FATAL,
+                    message=f"Gateway audit persistence failed: {exc}",
+                ),
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=tuple(audit_seqs),
+            )
+
+        try:
+            _emit_event(
+                self._event_bus,
+                session_id=session_id,
+                event_type="tool_call",
+                data={
+                    "call_id": call.call_id,
+                    "tool": call.tool,
+                    "decision": "block",
+                    "args_redacted": args_redacted,
+                },
+            )
+            _emit_event(
+                self._event_bus,
+                session_id=session_id,
+                event_type="blocked",
+                data={
+                    "call_id": call.call_id,
+                    "tool": call.tool,
+                    "code": err.code,
+                    "reason": err.message,
+                },
+            )
+        except EventBusError as exc:
+            return AgentLoopResult(
+                session_id=session_id,
+                status="error",
+                error=ErrorBody(
+                    code=ErrorCode.UPSTREAM_ERROR,
+                    message=f"Failed to publish blocked event: {exc}",
+                ),
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=tuple(audit_seqs),
+            )
+
+        return AgentLoopResult(
+            session_id=session_id,
+            status="blocked",
+            error=err,
+            calls_used=calls_used,
+            calls_max=calls_max,
+            turns=turns,
+            audit_seqs=tuple(audit_seqs),
+        )
+
+    def _run_from_state(
+        self,
+        *,
+        session_id: str,
+        system_prompt: str,
+        tools: tuple[ToolDefinition, ...],
+        messages: list[LlmMessage],
+        executor: Callable[[ValidatedArguments], Any],
+        session_state: SessionState,
+        calls_used: int,
+        calls_max: int,
+        turns: int,
+        audit_seqs: list[int],
+        pending_tool_calls: tuple[LlmToolCall, ...] = (),
+        on_approval_created: (
+            Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
+        ) = None,
+    ) -> AgentLoopResult:
+        """Execute any remaining tool calls, then run subsequent LLM turns."""
+        for idx, llm_call in enumerate(pending_tool_calls):
+            outcome = self._process_tool_call(
+                session_id=session_id,
+                llm_call=llm_call,
+                executor=executor,
+                session_state=session_state,
+                calls_used=calls_used,
+                calls_max=calls_max,
+                turns=turns,
+                audit_seqs=audit_seqs,
+                messages=messages,
+                system_prompt=system_prompt,
+                tools=tools,
+                remaining_tool_calls=pending_tool_calls[idx + 1 :],
+                on_approval_created=on_approval_created,
+            )
+            if outcome is not None:
+                return outcome
+            calls_used += 1
 
         while True:
             turns += 1
@@ -333,7 +856,7 @@ class AgentLoop:
                 )
             )
 
-            for llm_call in turn.tool_calls:
+            for idx, llm_call in enumerate(turn.tool_calls):
                 outcome = self._process_tool_call(
                     session_id=session_id,
                     llm_call=llm_call,
@@ -344,6 +867,10 @@ class AgentLoop:
                     turns=turns,
                     audit_seqs=audit_seqs,
                     messages=messages,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    remaining_tool_calls=turn.tool_calls[idx + 1 :],
+                    on_approval_created=on_approval_created,
                 )
                 if outcome is not None:
                     return outcome
@@ -361,6 +888,12 @@ class AgentLoop:
         turns: int,
         audit_seqs: list[int],
         messages: list[LlmMessage],
+        system_prompt: str,
+        tools: tuple[ToolDefinition, ...],
+        remaining_tool_calls: tuple[LlmToolCall, ...] = (),
+        on_approval_created: (
+            Callable[[ApprovalRequest, PendingApprovalContinuation], None] | None
+        ) = None,
     ) -> AgentLoopResult | None:
         """Process one requested tool call, returning a result only on stop."""
         if calls_used >= calls_max:
@@ -543,6 +1076,21 @@ class AgentLoop:
                 creation = self._approval_manager.create_approval(
                     pending, policy=self._policy
                 )
+                continuation = PendingApprovalContinuation(
+                    session_id=session_id,
+                    approval_id=creation.approval.approval_id,
+                    pending_call=call,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    messages=tuple(messages),
+                    remaining_tool_calls=remaining_tool_calls,
+                    calls_used=new_calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+                if on_approval_created is not None:
+                    on_approval_created(creation.approval, continuation)
                 return AgentLoopResult(
                     session_id=session_id,
                     status="awaiting_approval",
@@ -551,6 +1099,7 @@ class AgentLoop:
                     calls_max=calls_max,
                     turns=turns,
                     audit_seqs=tuple(audit_seqs),
+                    continuation=continuation,
                 )
 
             # Allowed call executed via injected gateway executor

@@ -55,6 +55,8 @@ from control_plane.sessions.container_manager import SessionContainerManager
 from control_plane.sessions.profile_loader import ProfileLoader
 from control_plane.sessions.session_runner import (
     RuntimeRegistry,
+    SessionRunner,
+    SessionRunnerError,
 )
 from fastapi.testclient import TestClient
 from mcp.server.mcpserver import MCPServer
@@ -233,13 +235,25 @@ class _FakeContainerObj:
 
     def _refresh_attrs(self) -> None:
         self.attrs = {
-            "State": {"Status": self.status, "Running": self.status == "running"},
+            "State": {
+                "Status": self.status,
+                "Running": self.status in ("running", "paused"),
+                "Paused": self.status == "paused",
+            },
             "Config": {"Labels": dict(self.labels)},
             "NetworkSettings": {"Networks": self._networks_meta},
         }
 
     def start(self) -> None:
         self.started_threads.append(threading.current_thread().name)
+        self.status = "running"
+        self._refresh_attrs()
+
+    def pause(self) -> None:
+        self.status = "paused"
+        self._refresh_attrs()
+
+    def unpause(self) -> None:
         self.status = "running"
         self._refresh_attrs()
 
@@ -551,6 +565,12 @@ def api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         }
     finally:
         # Shut down active test runtimes & executor before disposing DB engine.
+        with registry.lock:
+            pending_entries = list(registry.pending_approvals.values())
+            registry.pending_approvals.clear()
+        for entry in pending_entries:
+            if entry.timer is not None:
+                entry.timer.cancel()
         for sid in list(registry.runtimes.keys()):
             rt = registry.runtimes.pop(sid, None)
             if rt is not None:
@@ -989,3 +1009,536 @@ def test_post_sessions_does_not_block_event_loop_on_slow_startup_or_llm(
     release_llm.set()
     rec = _wait_future(registry, session_id)
     assert rec.status == "completed"
+
+
+def test_approval_continuation_executes_once_and_rejects_duplicate_and_mismatch(
+    api_env: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Approving resumes the waiting run, executes once, and ignores duplicates."""
+    caplog.set_level(logging.DEBUG)
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    factory = api_env["factory"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+
+    turn_num = [0]
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turn_num[0] += 1
+        if turn_num[0] == 1:
+            return LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_term_ok",
+                        tool="terminal.run",
+                        args={"command": "curl https://pypi.org/simple/"},
+                    ),
+                )
+            )
+        assert any(
+            m.role == "tool" and m.tool_call_id == "c_term_ok" and "ok" in m.content
+            for m in messages
+        )
+        return LlmTurnResponse(assistant_text="Approved command completed.")
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": SECRET_REQUEST_TEXT, "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    paused = _wait_future(registry, session_id)
+    assert paused.status == "awaiting_approval"
+    assert paused.pending_approval_id is not None
+    aid = paused.pending_approval_id
+    assert docker_env.terminal_commands == []
+
+    # Mismatched session_id on SessionRunner fails closed without consuming entry
+    runner = SessionRunner(
+        session_factory=factory,
+        container_manager=api_env["container_mgr"],
+        event_bus=api_env["bus"],
+        approval_manager=ApprovalManager(factory, api_env["bus"]),
+        profile_loader=ProfileLoader(REPO_ROOT / "profiles"),
+        policy_loader=PolicyLoader(REPO_ROOT / "policy.yaml"),
+        registry=registry,
+    )
+    from control_plane.audit.audit_writer import AuditWriter
+
+    dummy_audit = AuditWriter(factory).append(
+        session_id=session_id,
+        tool="terminal.run",
+        args={"command": "curl https://pypi.org/simple/"},
+        decision="asked_approved",
+        reason="dummy",
+        tier="sensitive",
+    )
+    from control_plane.gateway.approval_manager import ApprovalResolutionResult
+
+    with pytest.raises(SessionRunnerError):
+        runner.on_approval_resolved(
+            ApprovalResolutionResult(
+                approval_id=aid,
+                session_id="s_01ABCDEFGHJKMNPTVW00000000",
+                status="approved",
+                approved=True,
+                resolved_by="user",
+                resolved_at="2026-11-27T04:00:05Z",
+                timed_out=False,
+                audit_entry=dummy_audit,
+            )
+        )
+
+    # Approve via REST route -> resumes session & executes exactly once
+    r_approve = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": True},
+    )
+    assert r_approve.status_code == 200
+    assert r_approve.json() == {"ok": True}
+
+    final_rec = _wait_future(registry, session_id)
+    assert final_rec.status == "completed"
+    assert docker_env.terminal_commands == ["curl https://pypi.org/simple/"]
+
+    # Duplicate resolution returns 409 and never re-executes
+    r_dup = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": True},
+    )
+    assert r_dup.status_code == 409
+    assert r_dup.json()["error"]["code"] == ErrorCode.POLICY_BLOCK
+    assert docker_env.terminal_commands == ["curl https://pypi.org/simple/"]
+    assert SECRET_REQUEST_TEXT not in caplog.text
+
+
+def test_denial_resumes_agent_without_executing_tool(api_env: dict[str, Any]) -> None:
+    """Denying an approval emits USER_DENIED, resumes LLM, and skips execution."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+    factory = api_env["factory"]
+
+    turn_num = [0]
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turn_num[0] += 1
+        if turn_num[0] == 1:
+            return LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_term_deny",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        assert any(
+            m.role == "tool" and ErrorCode.USER_DENIED.value in m.content
+            for m in messages
+        )
+        return LlmTurnResponse(assistant_text="Understood, did not run curl.")
+
+    api_env["set_llm_factory"](lambda: _ScriptedLlm(_handler))
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Fetch page", "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+
+    paused = _wait_future(registry, session_id)
+    assert paused.status == "awaiting_approval"
+    aid = paused.pending_approval_id
+    assert aid is not None
+
+    r_deny = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": False},
+    )
+    assert r_deny.status_code == 200
+
+    final_rec = _wait_future(registry, session_id)
+    assert final_rec.status == "completed"
+    assert docker_env.terminal_commands == []
+
+    with factory() as db:
+        events = db.scalars(
+            select(EventModel)
+            .where(EventModel.session_id == session_id)
+            .order_by(EventModel.seq.asc())
+        ).all()
+        tool_results = [json.loads(e.data) for e in events if e.type == "tool_result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["ok"] is False
+        assert tool_results[0]["error"]["code"] == ErrorCode.USER_DENIED.value
+
+
+def test_timeout_without_polling_wakes_waiting_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deadline timer expires pending approval and wakes run without client polling."""
+    monkeypatch.setenv("APP_TOKEN", APP_TOKEN)
+    ws = tmp_path / "timeout_ws"
+    ws.mkdir()
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'timeout.db'}")
+    init_db(engine)
+    factory = create_session_factory(engine)
+    bus = EventBus(factory)
+    real_clock = lambda: datetime.now(UTC)  # noqa: E731
+    approval_mgr = ApprovalManager(factory, bus, clock=real_clock)
+    docker_env = _FakeDockerEnv(ws)
+    container_mgr = SessionContainerManager(docker_client=docker_env)
+    registry = RuntimeRegistry(max_workers=4)
+
+    base_policy = PolicyLoader(REPO_ROOT / "policy.yaml").load()
+    short_policy = base_policy.model_copy(
+        update={
+            "defaults": base_policy.defaults.model_copy(
+                update={"approval_timeout_s": 1}
+            )
+        }
+    )
+
+    class _ShortPolicyLoader:
+        def load(self):
+            return short_policy
+
+    turn_num = [0]
+
+    def _handler(messages: Sequence[LlmMessage], _tools: Any) -> LlmTurnResponse:
+        turn_num[0] += 1
+        if turn_num[0] == 1:
+            return LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_timeout",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        assert any(
+            m.role == "tool" and ErrorCode.APPROVAL_TIMEOUT.value in m.content
+            for m in messages
+        )
+        return LlmTurnResponse(assistant_text="Timed out safely.")
+
+    runner = SessionRunner(
+        session_factory=factory,
+        container_manager=container_mgr,
+        event_bus=bus,
+        approval_manager=approval_mgr,
+        profile_loader=ProfileLoader(REPO_ROOT / "profiles"),
+        policy_loader=_ShortPolicyLoader(),  # type: ignore[arg-type]
+        llm_factory=lambda: _ScriptedLlm(_handler),
+        clock=real_clock,
+        registry=registry,
+    )
+
+    try:
+        started = runner.start_session(
+            owner_id=derive_owner_id(APP_TOKEN),
+            request_text="Run curl",
+            profile_name="coding",
+        )
+        runner.dispatch_agent_run(started=started, request_text="Run curl")
+        paused = runner.wait_for_session(started.session_id, timeout=5.0)
+        assert paused is not None
+        assert paused.status == "awaiting_approval"
+        aid = paused.pending_approval_id
+        assert aid is not None
+
+        # Wait without calling GET /approvals or POST /approvals
+        deadline = datetime.now(UTC) + timedelta(seconds=5)
+        while datetime.now(UTC) < deadline:
+            rec = runner.get_run_record(started.session_id)
+            if rec is not None and rec.status == "completed":
+                break
+            threading.Event().wait(0.05)
+
+        final_rec = runner.wait_for_session(started.session_id, timeout=5.0)
+        assert final_rec is not None
+        assert final_rec.status == "completed"
+        assert docker_env.terminal_commands == []
+
+        with factory() as db:
+            row = db.get(ApprovalModel, aid)
+            assert row is not None and row.status == "timed_out"
+            audits = db.scalars(
+                select(AuditEntryModel)
+                .where(AuditEntryModel.session_id == started.session_id)
+                .order_by(AuditEntryModel.seq.asc())
+            ).all()
+            assert [(a.tool, a.decision) for a in audits] == [
+                ("terminal.run", "asked"),
+                ("terminal.run", "asked_denied"),
+            ]
+    finally:
+        runner.shutdown(wait=True)
+        engine.dispose()
+
+
+def test_session_end_while_waiting_cancels_timer_and_prevents_execution(
+    api_env: dict[str, Any],
+) -> None:
+    """Ending a session while awaiting approval cancels timer and blocks resume."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+
+    api_env["set_llm_factory"](
+        lambda: _ScriptedLlm(
+            lambda _m, _t: LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_end_wait",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        )
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Wait then end", "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+    paused = _wait_future(registry, session_id)
+    assert paused.status == "awaiting_approval"
+    aid = paused.pending_approval_id
+    assert aid is not None
+
+    with registry.lock:
+        entry = registry.pending_approvals.get(aid)
+        assert entry is not None
+        timer = entry.timer
+        assert timer is not None
+
+    end_resp = client.post(
+        f"/api/v1/sessions/{session_id}/end", headers=api_env["headers"]
+    )
+    assert end_resp.status_code == 200
+    assert end_resp.json() == {"state": "ENDED"}
+
+    # Pending continuation and timer were cleaned up
+    with registry.lock:
+        assert aid not in registry.pending_approvals
+    assert timer.finished.is_set()
+
+    # Late approval after end returns 409 SESSION_INACTIVE and never executes
+    late_resp = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": True},
+    )
+    assert late_resp.status_code == 409
+    assert late_resp.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE
+    assert docker_env.terminal_commands == []
+
+
+def test_missing_in_memory_continuation_after_restart_fails_closed(
+    api_env: dict[str, Any],
+) -> None:
+    """After process restart (empty registry), approval fails closed without exec."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+    factory = api_env["factory"]
+
+    api_env["set_llm_factory"](
+        lambda: _ScriptedLlm(
+            lambda _m, _t: LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_restart",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        )
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": SECRET_REQUEST_TEXT, "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+    paused = _wait_future(registry, session_id)
+    aid = paused.pending_approval_id
+    assert aid is not None
+
+    # Simulate control-plane restart with fresh empty RuntimeRegistry
+    restarted_registry = RuntimeRegistry(max_workers=2)
+    app.dependency_overrides[get_runtime_registry] = lambda: restarted_registry
+
+    try:
+        r_approve = client.post(
+            f"/api/v1/sessions/{session_id}/approvals/{aid}",
+            headers=api_env["headers"],
+            json={"approval_id": aid, "approve": True},
+        )
+        assert r_approve.status_code == 200
+        assert docker_env.terminal_commands == []
+        rec = restarted_registry.run_records.get(session_id)
+        assert rec is not None
+        assert rec.status == "error"
+        assert rec.error_code == ErrorCode.FATAL.value
+
+        with factory() as db:
+            row = db.get(ApprovalModel, aid)
+            assert row is not None and row.status == "approved"
+    finally:
+        restarted_registry.is_shutdown = True
+        restarted_registry.executor.shutdown(wait=True)
+        app.dependency_overrides[get_runtime_registry] = lambda: registry
+
+
+def test_post_approval_preflight_rejection_on_paused_session(
+    api_env: dict[str, Any],
+) -> None:
+    """Approving while session is PAUSED blocks via preflight without execution."""
+    client: TestClient = api_env["client"]
+    registry: RuntimeRegistry = api_env["registry"]
+    docker_env: _FakeDockerEnv = api_env["docker_env"]
+    factory = api_env["factory"]
+
+    api_env["set_llm_factory"](
+        lambda: _ScriptedLlm(
+            lambda _m, _t: LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_paused_ok",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        )
+    )
+
+    resp = client.post(
+        "/api/v1/sessions",
+        headers=api_env["headers"],
+        json={"request_text": "Pause then approve", "profile": "coding"},
+    )
+    assert resp.status_code == 200
+    session_id = resp.json()["session_id"]
+    paused = _wait_future(registry, session_id)
+    aid = paused.pending_approval_id
+    assert aid is not None
+
+    # Pause session via control route
+    r_pause = client.post(
+        f"/api/v1/sessions/{session_id}/pause", headers=api_env["headers"]
+    )
+    assert r_pause.status_code == 200
+
+    r_approve = client.post(
+        f"/api/v1/sessions/{session_id}/approvals/{aid}",
+        headers=api_env["headers"],
+        json={"approval_id": aid, "approve": True},
+    )
+    assert r_approve.status_code == 200
+
+    rec = _wait_future(registry, session_id)
+    assert rec.status == "blocked"
+    assert rec.error_code == ErrorCode.SESSION_INACTIVE.value
+    assert docker_env.terminal_commands == []
+
+    with factory() as db:
+        audits = db.scalars(
+            select(AuditEntryModel)
+            .where(AuditEntryModel.session_id == session_id)
+            .order_by(AuditEntryModel.seq.asc())
+        ).all()
+        assert [(a.tool, a.decision) for a in audits] == [
+            ("terminal.run", "asked"),
+            ("terminal.run", "asked_approved"),
+            ("terminal.run", "blocked"),
+        ]
+
+
+def test_session_runner_shutdown_cancels_pending_approval_timers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SessionRunner.shutdown() cancels waiting approval timers without hanging."""
+    monkeypatch.setenv("APP_TOKEN", APP_TOKEN)
+    ws = tmp_path / "shutdown_ws"
+    ws.mkdir()
+    engine = create_db_engine(f"sqlite:///{tmp_path / 'shutdown.db'}")
+    init_db(engine)
+    factory = create_session_factory(engine)
+    bus = EventBus(factory)
+    clock = _Clock()
+    approval_mgr = ApprovalManager(factory, bus, clock=clock)
+    docker_env = _FakeDockerEnv(ws)
+    container_mgr = SessionContainerManager(docker_client=docker_env)
+    registry = RuntimeRegistry(max_workers=2)
+
+    runner = SessionRunner(
+        session_factory=factory,
+        container_manager=container_mgr,
+        event_bus=bus,
+        approval_manager=approval_mgr,
+        profile_loader=ProfileLoader(REPO_ROOT / "profiles"),
+        policy_loader=PolicyLoader(REPO_ROOT / "policy.yaml"),
+        llm_factory=lambda: _ScriptedLlm(
+            lambda _m, _t: LlmTurnResponse(
+                tool_calls=(
+                    LlmToolCall(
+                        call_id="c_wait_sd",
+                        tool="terminal.run",
+                        args={"command": "curl https://example.com"},
+                    ),
+                )
+            )
+        ),
+        clock=clock,
+        registry=registry,
+    )
+
+    try:
+        started = runner.start_session(
+            owner_id=derive_owner_id(APP_TOKEN),
+            request_text="Wait for shutdown",
+            profile_name="coding",
+        )
+        runner.dispatch_agent_run(started=started, request_text="Wait for shutdown")
+        paused = runner.wait_for_session(started.session_id, timeout=5.0)
+        assert paused is not None
+        assert paused.status == "awaiting_approval"
+        aid = paused.pending_approval_id
+        assert aid is not None
+        with registry.lock:
+            timer = registry.pending_approvals[aid].timer
+            assert timer is not None
+
+        runner.shutdown(wait=True)
+        assert timer.finished.is_set()
+        assert registry.pending_approvals == {}
+        assert registry.runtimes == {}
+        assert docker_env.terminal_commands == []
+    finally:
+        if not registry.is_shutdown:
+            runner.shutdown(wait=True)
+        engine.dispose()
