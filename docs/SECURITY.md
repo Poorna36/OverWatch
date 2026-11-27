@@ -68,6 +68,8 @@ Implement via Docker SDK with equivalent options. Additional rules:
 
 - App ↔ API: static bearer token (demo). Rotate by changing `.env`.
 - WS and live-view: session-scoped tokens, 15-minute expiry, refreshable while the session is active.
+- Live-view WebSockets require an `Origin` matching the configured public view/API origin. Missing and cross-origin handshakes are rejected; cookie authentication alone is not a CSRF defense for WebSockets.
+- The view cookie is HttpOnly, SameSite Strict, scoped to the session view path, and marked Secure when the configured public URL uses HTTPS. Relayed WebSocket messages are size-limited.
 - Run the control-plane Uvicorn server with `--no-access-log` so query-string `?token=...` credentials on WS/view handshakes are never written to server access logs (preserving application error logs).
 - Reject any request for a session not owned by the caller.
 

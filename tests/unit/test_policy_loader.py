@@ -54,6 +54,14 @@ def test_load_repo_policy_yaml() -> None:
         "desktop.click",
         "desktop.type",
         "desktop.key",
+        "calendar.list_events",
+        "calendar.create_event",
+        "calendar.update_event",
+        "calendar.delete_event",
+        "gmail.search",
+        "gmail.read_message",
+        "gmail.create_draft",
+        "gmail.send",
     }
     assert set(policy.tools.keys()) == expected_tools
     assert policy.tools["files.write"].max_arg_bytes == 1000000

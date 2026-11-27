@@ -28,6 +28,7 @@ from control_plane.contracts import (
     Decision,
     ErrorBody,
     ErrorCode,
+    Plan,
     Policy,
     Profile,
     SessionState,
@@ -114,19 +115,32 @@ class AuditedGatewayCoordinator:
         executor: Callable[[ValidatedArguments], Any],
         session_state: SessionState = "ACTIVE",
         workspace_root: Path | str | None = None,
+        approved_plan: Plan | None = None,
+        dry_run: bool = False,
     ) -> AuditedCallResult:
         """Evaluate, audit-log, and conditionally execute a single ``ToolCall``."""
         if not callable(executor):
             raise TypeError("executor must be callable.")
 
-        preflight = self.pipeline.evaluate(
-            call,
-            profile,
-            session_state=session_state,
-            workspace_root=workspace_root,
+        eval_kwargs: dict[str, Any] = {
+            "session_state": session_state,
+            "workspace_root": workspace_root,
+        }
+        if approved_plan is not None:
+            eval_kwargs["approved_plan"] = approved_plan
+        preflight = self.pipeline.evaluate(call, profile, **eval_kwargs)
+        is_dry_run_write = (
+            dry_run
+            and preflight.decision != "block"
+            and preflight.tier is not None
+            and preflight.tier != "read"
         )
-        audit_decision = _resolve_audit_decision(preflight)
-        audit_reason = _resolve_audit_reason(preflight, audit_decision)
+        if is_dry_run_write:
+            audit_decision: AuditDecision = "dry_run"
+            audit_reason = "dry_run preview (write suppressed)"
+        else:
+            audit_decision = _resolve_audit_decision(preflight)
+            audit_reason = _resolve_audit_reason(preflight, audit_decision)
 
         # Persist the gateway decision BEFORE any executor can run (fail-closed).
         audit_entry = self.audit_writer.append(
@@ -137,6 +151,21 @@ class AuditedGatewayCoordinator:
             reason=audit_reason,
             tier=preflight.tier,
         )
+
+        if is_dry_run_write:
+            return AuditedCallResult(
+                preflight=preflight,
+                audit_entry=audit_entry,
+                tool_result=ToolResult(
+                    call_id=call.call_id,
+                    ok=True,
+                    decision="dry_run",
+                    result={"dry_run": True, "tool": call.tool},
+                    error=None,
+                    audit_seq=audit_entry.seq,
+                ),
+                executed=False,
+            )
 
         if preflight.decision == "block":
             error = preflight.error or ErrorBody(

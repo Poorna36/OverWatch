@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -18,7 +18,13 @@ from control_plane.api.deps import (
 )
 from control_plane.api.main import app
 from control_plane.api.stream import get_stream_clock
-from control_plane.api.stream_tokens import verify_stream_token
+from control_plane.api.stream_tokens import (
+    StreamTokenError,
+    issue_stream_token,
+    issue_view_token,
+    verify_stream_token,
+    verify_view_token,
+)
 from control_plane.contracts import ErrorCode
 from control_plane.db.models import SessionModel
 from control_plane.db.session import create_db_engine, create_session_factory, init_db
@@ -75,7 +81,7 @@ def read_api_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_stream_clock] = lambda: (lambda: BASE_NOW)
 
     try:
-        client = TestClient(app)
+        client = TestClient(app, base_url="https://overwatch.example.com:8443")
         yield {
             "client": client,
             "factory": factory,
@@ -209,8 +215,8 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
         "profile",
         "created_at",
         "stream_url",
+        "view_url",
     }
-    assert "view_url" not in body
     assert body["session_id"] == SESSION_ACTIVE
     assert body["state"] == "ACTIVE"
     assert body["profile"] == "coding"
@@ -230,12 +236,43 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
     assert claims.owner_id == owner_id
     assert claims.session_id == SESSION_ACTIVE
 
-    # Verify token & raw APP_TOKEN never appeared in logs
+    parsed_view = urlsplit(body["view_url"])
+    assert parsed_view.scheme == "https"
+    assert parsed_view.netloc == "overwatch.example.com:8443"
+    assert parsed_view.path == f"/api/v1/sessions/{SESSION_ACTIVE}/view"
+    view_token = parse_qs(parsed_view.query)["token"][0]
+    view_claims = verify_view_token(
+        view_token,
+        expected_session_id=SESSION_ACTIVE,
+        signing_key=TEST_TOKEN,
+        now=BASE_NOW,
+    )
+    assert view_claims.owner_id == owner_id
+    assert view_claims.session_id == SESSION_ACTIVE
+    assert view_claims.scope == "view"
+
+    with pytest.raises(StreamTokenError):
+        verify_stream_token(
+            view_token,
+            expected_session_id=SESSION_ACTIVE,
+            signing_key=TEST_TOKEN,
+            now=BASE_NOW,
+        )
+    with pytest.raises(StreamTokenError):
+        verify_view_token(
+            token,
+            expected_session_id=SESSION_ACTIVE,
+            signing_key=TEST_TOKEN,
+            now=BASE_NOW,
+        )
+
+    # Verify tokens & raw APP_TOKEN never appeared in logs
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert token not in log_text
+    assert view_token not in log_text
     assert TEST_TOKEN not in log_text
 
-    # Also verify http -> ws scheme conversion with path prefix
+    # Also verify http -> ws / http scheme conversion with path prefix
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000/proxy/")
     resp_ws = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}", headers=headers)
     assert resp_ws.status_code == 200
@@ -243,6 +280,17 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
     assert parsed_ws.scheme == "ws"
     assert parsed_ws.netloc == "127.0.0.1:8000"
     assert parsed_ws.path == f"/proxy/api/v1/sessions/{SESSION_ACTIVE}/stream"
+    parsed_http_view = urlsplit(resp_ws.json()["view_url"])
+    assert parsed_http_view.scheme == "http"
+    assert parsed_http_view.netloc == "127.0.0.1:8000"
+    assert parsed_http_view.path == f"/proxy/api/v1/sessions/{SESSION_ACTIVE}/view"
+
+    # Optional dedicated PUBLIC_VIEW_BASE_URL overrides view_url origin only
+    monkeypatch.setenv("PUBLIC_VIEW_BASE_URL", "https://view.example.com")
+    resp_split = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}", headers=headers)
+    assert resp_split.status_code == 200
+    assert urlsplit(resp_split.json()["view_url"]).netloc == "view.example.com"
+    assert urlsplit(resp_split.json()["stream_url"]).netloc == "127.0.0.1:8000"
 
 
 @pytest.mark.parametrize("inactive_state", ["ENDING", "ENDED", "FAILED"])
@@ -503,3 +551,199 @@ def test_screenshot_route_auth_ownership_inactive_and_jpeg_output(
     ended = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/screenshot", headers=headers)
     assert ended.status_code == 409
     assert ended.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value
+
+
+def test_live_view_entry_assets_and_websockify_isolation(
+    read_api_env: dict[str, Any],
+) -> None:
+    """View entry, immutable asset serving, and WS proxy enforce strict isolation."""
+    from starlette.websockets import WebSocketDisconnect
+
+    client: TestClient = read_api_env["client"]
+    factory = read_api_env["factory"]
+    owner_id: str = read_api_env["owner_id"]
+
+    class _FakeBridge:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, bytes]] = []
+            self.closed = False
+            self._replies: list[tuple[int, bytes] | None] = [
+                (0x2, b"RFB 003.008\n"),
+                None,
+            ]
+
+        def recv_frame(self) -> tuple[int, bytes] | None:
+            if self._replies:
+                return self._replies.pop(0)
+            return None
+
+        def send_frame(self, opcode: int, payload: bytes) -> None:
+            self.sent.append((opcode, payload))
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeViewRuntime:
+        def __init__(self) -> None:
+            self.bridge = _FakeBridge()
+
+        def read_view_asset(self, rel_path: str) -> tuple[bytes, str]:
+            if rel_path == "vnc.html":
+                return (
+                    b"<html><title>KasmVNC</title></html>",
+                    "text/html; charset=utf-8",
+                )
+            raise McpTransportError("Not found")
+
+        def open_view_ws_bridge(self) -> _FakeBridge:
+            return self.bridge
+
+    fake_rt = _FakeViewRuntime()
+
+    class _FakeRunner:
+        def __init__(self, rt: Any) -> None:
+            self._rt = rt
+
+        def get_runtime(self, session_id: str) -> Any:
+            if session_id == SESSION_ACTIVE:
+                return self._rt
+            return None
+
+    holder: dict[str, Any] = {"runner": _FakeRunner(fake_rt)}
+    app.dependency_overrides[get_session_runner] = lambda: holder["runner"]
+
+    # Missing, wrong-scope, expired, wrong-session, wrong-owner rejections on /view
+    assert client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view").status_code == 401
+    stream_tok = issue_stream_token(
+        session_id=SESSION_ACTIVE,
+        owner_id=owner_id,
+        signing_key=TEST_TOKEN,
+        now=BASE_NOW,
+    )
+    assert (
+        client.get(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={stream_tok}"
+        ).status_code
+        == 401
+    )
+    expired_tok = issue_view_token(
+        session_id=SESSION_ACTIVE,
+        owner_id=owner_id,
+        signing_key=TEST_TOKEN,
+        ttl_seconds=60,
+        now=BASE_NOW - timedelta(minutes=5),
+    )
+    assert (
+        client.get(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={expired_tok}"
+        ).status_code
+        == 401
+    )
+    wrong_sess_tok = issue_view_token(
+        session_id=SESSION_OTHER,
+        owner_id=owner_id,
+        signing_key=TEST_TOKEN,
+        now=BASE_NOW,
+    )
+    assert (
+        client.get(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={wrong_sess_tok}"
+        ).status_code
+        == 401
+    )
+    wrong_owner_tok = issue_view_token(
+        session_id=SESSION_ACTIVE,
+        owner_id="owner_other",
+        signing_key=TEST_TOKEN,
+        now=BASE_NOW,
+    )
+    assert (
+        client.get(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={wrong_owner_tok}"
+        ).status_code
+        == 404
+    )
+
+    # Valid view token exchanges for path-scoped HttpOnly cookie and redirects
+    valid_tok = issue_view_token(
+        session_id=SESSION_ACTIVE,
+        owner_id=owner_id,
+        signing_key=TEST_TOKEN,
+        now=BASE_NOW,
+    )
+    entry = client.get(
+        f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={valid_tok}",
+        follow_redirects=False,
+    )
+    assert entry.status_code == 302
+    assert (
+        entry.headers["location"] == f"/api/v1/sessions/{SESSION_ACTIVE}/view/vnc.html"
+    )
+    set_cookie = entry.headers["set-cookie"]
+    assert "HttpOnly" in set_cookie
+    assert "secure" in set_cookie.lower()
+    assert (
+        "SameSite=strict" in set_cookie.lower()
+        or "samesite=strict" in set_cookie.lower()
+    )
+    assert f"Path=/api/v1/sessions/{SESSION_ACTIVE}/view" in set_cookie
+
+    # Asset route uses cookie (no query token) and sets security headers
+    asset = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view/vnc.html")
+    assert asset.status_code == 200
+    assert b"KasmVNC" in asset.content
+    assert asset.headers["x-content-type-options"] == "nosniff"
+    assert asset.headers["cache-control"] == "no-store"
+    assert asset.headers["x-frame-options"] == "SAMEORIGIN"
+    assert "object-src 'none'" in asset.headers["content-security-policy"]
+
+    # Cross-session cookie/token cannot access another session's assets or WS
+    cross_asset = client.get(
+        f"/api/v1/sessions/{SESSION_OTHER}/view/vnc.html?token={valid_tok}",
+    )
+    assert cross_asset.status_code == 401
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            f"/api/v1/sessions/{SESSION_OTHER}/view/websockify?token={valid_tok}",
+            headers={"Origin": "https://overwatch.example.com:8443"},
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+    # Valid WS connection relays frames and closes bridge on exit
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify",
+            headers={"Origin": "https://attacker.example"},
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify"
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+    with client.websocket_connect(
+        f"/api/v1/sessions/{SESSION_ACTIVE}/view/websockify",
+        headers={
+            "Origin": "https://overwatch.example.com:8443",
+            "Cookie": f"overwatch_view={client.cookies.get('overwatch_view')}",
+        },
+        subprotocols=["binary"],
+    ) as ws:
+        assert ws.receive_bytes() == b"RFB 003.008\n"
+        ws.send_bytes(b"client-rfb")
+    assert fake_rt.bridge.closed is True
+
+    # Ended session rejects /view and WS
+    with factory() as db:
+        row = db.get(SessionModel, SESSION_ACTIVE)
+        assert row is not None
+        row.state = "ENDED"
+        db.commit()
+    ended_view = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={valid_tok}")
+    assert ended_view.status_code == 409
+    assert ended_view.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value

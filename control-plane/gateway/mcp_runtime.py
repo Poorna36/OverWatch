@@ -25,15 +25,18 @@ Security & deployment boundaries:
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import hashlib
 import json
 import re
+import secrets
 import socket
 import struct
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -484,6 +487,79 @@ class ContainerPathJail(PathJail):
 
 
 _MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
+_MAX_VIEW_ASSET_BYTES = 8 * 1024 * 1024
+DEFAULT_VIEW_WS_PORT = 6800
+MAX_VIEW_WS_FRAME_BYTES = 16 * 1024 * 1024
+_VIEW_WWW_ROOT = "/usr/share/kasmvnc/www"
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+_VIEW_ASSET_MIME_TYPES: dict[str, str] = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".json": "application/json; charset=utf-8",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".oga": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".wasm": "application/wasm",
+    ".map": "application/json; charset=utf-8",
+}
+_VIEW_ASSET_READ_ARGV: tuple[str, ...] = (
+    "python3",
+    "-c",
+    (
+        "import os, sys\n"
+        "root = os.path.realpath(sys.argv[1])\n"
+        "target = os.path.realpath(os.path.join(root, sys.argv[2]))\n"
+        "if target != root and not target.startswith(root + os.sep):\n"
+        "    sys.exit(2)\n"
+        "if not os.path.isfile(target):\n"
+        "    sys.exit(3)\n"
+        "if os.path.getsize(target) > int(sys.argv[3]):\n"
+        "    sys.exit(4)\n"
+        "with open(target, 'rb') as f:\n"
+        "    sys.stdout.buffer.write(f.read())\n"
+    ),
+)
+_VIEW_WS_BRIDGE_ARGV: tuple[str, ...] = (
+    "python3",
+    "-c",
+    (
+        "import os, selectors, socket, sys\n"
+        "sock = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5)\n"
+        "sock.setblocking(False)\n"
+        "stdin_fd = sys.stdin.buffer.fileno()\n"
+        "stdout_fd = sys.stdout.buffer.fileno()\n"
+        "os.set_blocking(stdin_fd, False)\n"
+        "sel = selectors.DefaultSelector()\n"
+        "sel.register(stdin_fd, selectors.EVENT_READ, 'in')\n"
+        "sel.register(sock, selectors.EVENT_READ, 'sock')\n"
+        "try:\n"
+        "    while True:\n"
+        "        for key, _ in sel.select():\n"
+        "            if key.data == 'in':\n"
+        "                data = os.read(stdin_fd, 65536)\n"
+        "                if not data:\n"
+        "                    raise SystemExit(0)\n"
+        "                sock.setblocking(True)\n"
+        "                sock.sendall(data)\n"
+        "                sock.setblocking(False)\n"
+        "            else:\n"
+        "                data = sock.recv(65536)\n"
+        "                if not data:\n"
+        "                    raise SystemExit(0)\n"
+        "                os.write(stdout_fd, data)\n"
+        "except (BrokenPipeError, OSError):\n"
+        "    pass\n"
+        "finally:\n"
+        "    sel.close()\n"
+        "    sock.close()\n"
+    ),
+    str(DEFAULT_VIEW_WS_PORT),
+)
 _JPEG_MAGIC = b"\xff\xd8\xff"
 _SCREENSHOT_CAPTURE_ARGV: tuple[str, ...] = (
     "python3",
@@ -509,6 +585,164 @@ _SCREENSHOT_CAPTURE_ARGV: tuple[str, ...] = (
         "        os.unlink(path)\n"
     ),
 )
+
+
+class ViewWebSocketBridge:
+    """RFC 6455 WebSocket client bridge over a Docker-exec multiplexed socket."""
+
+    def __init__(
+        self,
+        *,
+        sock: Any,
+        on_close: Callable[[ViewWebSocketBridge], None] | None = None,
+    ) -> None:
+        self._sock = sock
+        self._on_close = on_close
+        self._rx_buf = bytearray()
+        self._tx_lock = threading.Lock()
+        self._closed = False
+
+    def _read_exact_socket(self, n: int) -> bytes:
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self._sock.recv(n - len(buf))
+            if not chunk:
+                raise EOFError("Docker exec stream closed.")
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _fill_rx_buf(self) -> None:
+        while True:
+            header = self._read_exact_socket(8)
+            stream_type, size = struct.unpack(">B3xI", header)
+            payload = self._read_exact_socket(size) if size > 0 else b""
+            if stream_type == 1 and payload:
+                self._rx_buf.extend(payload)
+                return
+            # Ignore stderr noise (stream_type == 2) and keep reading stdout.
+
+    def _read_exact(self, n: int) -> bytes:
+        while len(self._rx_buf) < n:
+            self._fill_rx_buf()
+        out = bytes(self._rx_buf[:n])
+        del self._rx_buf[:n]
+        return out
+
+    def _read_until(self, marker: bytes, *, max_bytes: int = 16384) -> bytes:
+        while True:
+            idx = self._rx_buf.find(marker)
+            if idx != -1:
+                end = idx + len(marker)
+                out = bytes(self._rx_buf[:end])
+                del self._rx_buf[:end]
+                return out
+            if len(self._rx_buf) > max_bytes:
+                raise McpTransportError(
+                    "Upstream WebSocket handshake header too large."
+                )
+            self._fill_rx_buf()
+
+    def handshake(self) -> None:
+        """Perform HTTP/1.1 WebSocket upgrade with container loopback Xvnc."""
+        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
+        expected_accept = base64.b64encode(
+            hashlib.sha1(f"{key}{_WS_GUID}".encode("ascii")).digest()
+        ).decode("ascii")
+        req = (
+            "GET /websockify HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{DEFAULT_VIEW_WS_PORT}\r\n"
+            f"Origin: http://127.0.0.1:{DEFAULT_VIEW_WS_PORT}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Protocol: binary\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        )
+        with self._tx_lock:
+            self._sock.sendall(req.encode("ascii"))
+
+        raw_hdr = self._read_until(b"\r\n\r\n")
+        lines = raw_hdr.decode("latin1").split("\r\n")
+        if not lines or "101" not in lines[0]:
+            raise McpTransportError(
+                f"Upstream Xvnc rejected WebSocket upgrade: {lines[0] if lines else ''}"
+            )
+        headers: dict[str, str] = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+        if headers.get("sec-websocket-accept") != expected_accept:
+            raise McpTransportError("Invalid Sec-WebSocket-Accept from Xvnc.")
+
+    def recv_frame(self) -> tuple[int, bytes] | None:
+        """Read next RFC 6455 message from Xvnc, returning (opcode, payload) or None."""
+        while True:
+            try:
+                b0, b1 = self._read_exact(2)
+            except (EOFError, OSError):
+                return None
+            opcode = b0 & 0x0F
+            masked = (b1 & 0x80) != 0
+            length = b1 & 0x7F
+            if length == 126:
+                (length,) = struct.unpack("!H", self._read_exact(2))
+            elif length == 127:
+                (length,) = struct.unpack("!Q", self._read_exact(8))
+            if length > MAX_VIEW_WS_FRAME_BYTES:
+                raise McpTransportError("Upstream WebSocket frame exceeds size limit.")
+            mask_key = self._read_exact(4) if masked else b""
+            payload = self._read_exact(length) if length > 0 else b""
+            if masked:
+                payload = bytes(
+                    payload[i] ^ mask_key[i % 4] for i in range(len(payload))
+                )
+            if opcode == 0x8:
+                return None
+            if opcode == 0x9:
+                self.send_frame(0xA, payload)
+                continue
+            if opcode in (0x1, 0x2):
+                return opcode, payload
+
+    def send_frame(self, opcode: int, payload: bytes) -> None:
+        """Send a masked RFC 6455 frame to Xvnc."""
+        if self._closed:
+            return
+        header = bytearray([0x80 | (opcode & 0x0F)])
+        n = len(payload)
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 65536:
+            header.append(0x80 | 126)
+            header.extend(struct.pack("!H", n))
+        else:
+            header.append(0x80 | 127)
+            header.extend(struct.pack("!Q", n))
+        mask = secrets.token_bytes(4)
+        header.extend(mask)
+        masked_payload = bytes(payload[i] ^ mask[i % 4] for i in range(n))
+        with self._tx_lock:
+            if not self._closed:
+                self._sock.sendall(bytes(header) + masked_payload)
+
+    def close(self) -> None:
+        """Close the underlying Docker-exec socket."""
+        with self._tx_lock:
+            if self._closed:
+                return
+            self._closed = True
+            for target in (self._sock, getattr(self._sock, "_sock", None)):
+                if target is not None and hasattr(target, "shutdown"):
+                    with contextlib.suppress(OSError, ValueError):
+                        target.shutdown(socket.SHUT_RDWR)
+                    break
+            with contextlib.suppress(Exception):
+                self._sock.close()
+        if self._on_close is not None:
+            callback = self._on_close
+            self._on_close = None
+            callback(self)
 
 
 class SessionMcpRuntime:
@@ -544,6 +778,7 @@ class SessionMcpRuntime:
         self._verified_container_id: str | None = None
         self._desktop_ready = False
         self._desktop_bg_pids: list[int] = []
+        self._view_bridges: set[ViewWebSocketBridge] = set()
         self._servers: dict[str, _ServerHandle] = {}
 
         self._loop = asyncio.new_event_loop()
@@ -746,7 +981,7 @@ class SessionMcpRuntime:
         return None
 
     def ensure_desktop_display(self) -> str:
-        """Ensure Xvfb + openbox are running inside the container (no KasmVNC)."""
+        """Ensure Xvnc (KasmVNC loopback) + openbox are running on DISPLAY."""
         with self._lock:
             if self._closed:
                 raise McpRuntimeClosedError()
@@ -770,20 +1005,36 @@ class SessionMcpRuntime:
                 container_id, ["mkdir", "-p", "-m", "1777", "/tmp/.X11-unix"]
             )
 
-            xvfb_pid = self._start_detached_exec(
+            geometry = (
+                DEFAULT_DESKTOP_SCREEN.rsplit("x", 1)[0]
+                if DEFAULT_DESKTOP_SCREEN.count("x") == 2
+                else DEFAULT_DESKTOP_SCREEN
+            )
+            xvnc_pid = self._start_detached_exec(
                 container_id,
                 [
-                    "Xvfb",
+                    "Xvnc",
                     self._display,
-                    "-screen",
+                    "-geometry",
+                    geometry,
+                    "-depth",
+                    "24",
+                    "-interface",
+                    "127.0.0.1",
+                    "-publicIP",
+                    "127.0.0.1",
+                    "-websocketPort",
+                    str(DEFAULT_VIEW_WS_PORT),
+                    "-DisableBasicAuth",
+                    "1",
+                    "-SecurityTypes",
+                    "None",
+                    "-sslOnly",
                     "0",
-                    DEFAULT_DESKTOP_SCREEN,
-                    "-nolisten",
-                    "tcp",
                 ],
             )
-            if xvfb_pid is not None:
-                self._desktop_bg_pids.append(xvfb_pid)
+            if xvnc_pid is not None:
+                self._desktop_bg_pids.append(xvnc_pid)
 
             deadline = time.monotonic() + self._display_wait_s
             ready = False
@@ -800,7 +1051,7 @@ class SessionMcpRuntime:
 
             if not ready:
                 raise McpTransportError(
-                    f"Timed out waiting for Xvfb display {self._display!r} inside "
+                    f"Timed out waiting for Xvnc display {self._display!r} inside "
                     f"session container '{self._container_ref}'."
                 )
 
@@ -814,6 +1065,95 @@ class SessionMcpRuntime:
 
             self._desktop_ready = True
             return self._display
+
+    def read_view_asset(self, rel_path: str) -> tuple[bytes, str]:
+        """Read an immutable KasmVNC static asset from /usr/share/kasmvnc/www."""
+        with self._lock:
+            if self._closed:
+                raise McpRuntimeClosedError()
+            container_id = self.verify_container()
+
+        if "\x00" in rel_path or "\\" in rel_path:
+            raise McpTransportError("Invalid view asset path.")
+        cleaned = rel_path.lstrip("/")
+        if not cleaned or cleaned == ".":
+            cleaned = "vnc.html"
+        posix = PurePosixPath(cleaned)
+        if posix.is_absolute() or any(part in ("", ".", "..") for part in posix.parts):
+            raise McpTransportError("Invalid view asset path traversal.")
+
+        mime_type = _VIEW_ASSET_MIME_TYPES.get(posix.suffix.lower())
+        if mime_type is None:
+            raise McpTransportError(
+                f"Unsupported view asset type: {posix.suffix or '(none)'}."
+            )
+
+        argv = [
+            *_VIEW_ASSET_READ_ARGV,
+            _VIEW_WWW_ROOT,
+            str(posix),
+            str(_MAX_VIEW_ASSET_BYTES),
+        ]
+        exit_code, raw = self._run_exec_capture(container_id, argv)
+        if exit_code != 0:
+            raise McpTransportError(
+                f"View asset '{posix}' not found or unreadable (exit={exit_code})."
+            )
+        if len(raw) > _MAX_VIEW_ASSET_BYTES:
+            raise McpTransportError("View asset exceeds maximum allowed size.")
+        return raw, mime_type
+
+    def open_view_ws_bridge(self) -> ViewWebSocketBridge:
+        """Open a docker-exec WebSocket bridge to the container's loopback Xvnc."""
+        with self._lock:
+            if self._closed:
+                raise McpRuntimeClosedError()
+            self.ensure_desktop_display()
+            container_id = self.verify_container()
+
+        try:
+            created = self._client.api.exec_create(
+                container_id,
+                list(_VIEW_WS_BRIDGE_ARGV),
+                stdin=True,
+                stdout=True,
+                stderr=True,
+                tty=False,
+                privileged=False,
+                user=DEFAULT_CONTAINER_USER,
+                workdir=DEFAULT_CONTAINER_WORKDIR,
+            )
+            exec_id = created["Id"]
+            raw_sock = self._client.api.exec_start(
+                exec_id, detach=False, tty=False, socket=True
+            )
+        except (docker.errors.APIError, KeyError, TypeError) as exc:
+            raise McpTransportError(
+                f"Failed to open view WebSocket bridge: {exc}"
+            ) from exc
+
+        sock = getattr(raw_sock, "_sock", raw_sock)
+
+        def _on_bridge_close(b: ViewWebSocketBridge) -> None:
+            with self._lock:
+                self._view_bridges.discard(b)
+
+        bridge = ViewWebSocketBridge(
+            sock=sock,
+            on_close=_on_bridge_close,
+        )
+        try:
+            bridge.handshake()
+        except Exception:
+            bridge.close()
+            raise
+
+        with self._lock:
+            if self._closed:
+                bridge.close()
+                raise McpRuntimeClosedError()
+            self._view_bridges.add(bridge)
+        return bridge
 
     def capture_screenshot_jpeg(self) -> bytes:
         """Capture a live JPEG screenshot from the session container's display."""
@@ -1106,9 +1446,15 @@ class SessionMcpRuntime:
             self._closed = True
             handles = list(self._servers.values())
             self._servers.clear()
+            bridges = list(self._view_bridges)
+            self._view_bridges.clear()
             bg_pids = list(reversed(self._desktop_bg_pids))
             self._desktop_bg_pids.clear()
             container_id = self._verified_container_id
+
+        for bridge in bridges:
+            with contextlib.suppress(Exception):
+                bridge.close()
 
         for handle in handles:
             if self._loop.is_running():

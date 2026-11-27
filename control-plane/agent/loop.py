@@ -19,8 +19,19 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
+from control_plane.agent.budget import (
+    BudgetAccountingError,
+    BudgetMeter,
+    ModelPricing,
+    load_pricing_from_env,
+)
+from control_plane.agent.failure_handler import (
+    DEFAULT_MAX_TRANSIENT_RETRIES,
+    LoopBreaker,
+    sanitize_diagnostic_text,
+)
 from control_plane.agent.llm import (
     LlmAdapter,
     LlmAdapterError,
@@ -33,7 +44,9 @@ from control_plane.contracts import (
     ApprovalRequest,
     ErrorBody,
     ErrorCode,
+    Plan,
     Policy,
+    ProblemReport,
     Profile,
     SessionState,
     ToolCall,
@@ -61,11 +74,16 @@ from control_plane.gateway.path_jail import (
 )
 from control_plane.gateway.pipeline import PreflightRejectedError, execute_if_allowed
 
+if TYPE_CHECKING:
+    from control_plane.sessions.dry_run import DryRunManager
+    from control_plane.sessions.undo_manager import FileReader, UndoCapture, UndoManager
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 LoopStatus = Literal[
     "completed",
     "blocked",
+    "paused",
     "awaiting_approval",
     "budget_exceeded",
     "error",
@@ -134,6 +152,7 @@ class AgentLoopResult:
     assistant_message: str | None = None
     error: ErrorBody | None = None
     pending_approval: ApprovalRequest | None = None
+    problem_report: ProblemReport | None = None
     calls_used: int = 0
     calls_max: int = 0
     turns: int = 0
@@ -244,6 +263,7 @@ def _emit_budget_event(
     session_id: str,
     calls_used: int,
     calls_max: int,
+    usd_used: float | None,
     usd_max: float,
 ) -> None:
     _emit_event(
@@ -253,7 +273,7 @@ def _emit_budget_event(
         data={
             "calls_used": calls_used,
             "calls_max": calls_max,
-            "usd_used": 0.0,
+            "usd_used": usd_used,
             "usd_max": usd_max,
         },
     )
@@ -273,6 +293,13 @@ class AgentLoop:
         profile: Profile,
         prompts_base_dir: Path | str = REPO_ROOT,
         workspace_root: Path | str = DEFAULT_WORKSPACE_ROOT,
+        approved_plan: Plan | None = None,
+        undo_manager: UndoManager | None = None,
+        file_reader: FileReader | None = None,
+        dry_run: bool = False,
+        dry_run_manager: DryRunManager | None = None,
+        pricing: Mapping[str, ModelPricing] | None = None,
+        require_usd_accounting: bool | None = None,
     ) -> None:
         self._llm = llm
         self._coordinator = coordinator
@@ -282,6 +309,26 @@ class AgentLoop:
         self._profile = profile
         self._prompts_base_dir = prompts_base_dir
         self._workspace_root = workspace_root
+        self._approved_plan = approved_plan
+        self._undo_manager = undo_manager
+        self._file_reader = file_reader
+        self._dry_run = dry_run
+        self._dry_run_manager = dry_run_manager
+        self._loop_breaker = LoopBreaker()
+        resolved_pricing = (
+            dict(pricing) if pricing is not None else load_pricing_from_env()
+        )
+        strict_usd = (
+            require_usd_accounting
+            if require_usd_accounting is not None
+            else bool(resolved_pricing)
+        )
+        self._budget_meter = BudgetMeter(
+            calls_max=profile.budget.max_tool_calls,
+            usd_max=profile.budget.max_usd,
+            pricing=resolved_pricing,
+            require_usd_accounting=strict_usd,
+        )
 
     def run(
         self,
@@ -675,8 +722,12 @@ class AgentLoop:
             )
         except Exception as exc:
             exec_error = ErrorBody(
-                code=ErrorCode.UPSTREAM_ERROR,
-                message=f"Tool execution failed: {exc}",
+                code=(
+                    ErrorCode.TIMEOUT
+                    if isinstance(exc, TimeoutError)
+                    else ErrorCode.UPSTREAM_ERROR
+                ),
+                message=f"Tool execution failed: {sanitize_diagnostic_text(str(exc))}",
             )
             duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
             try:
@@ -909,6 +960,67 @@ class AgentLoop:
                     audit_seqs=tuple(audit_seqs),
                 )
 
+            try:
+                self._budget_meter.record_llm_usage(turn.usage)
+            except BudgetAccountingError as exc:
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="error",
+                    error=ErrorBody(
+                        code=ErrorCode.BUDGET_EXCEEDED,
+                        message=str(exc),
+                    ),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
+            if self._budget_meter.is_usd_exceeded():
+                err = ErrorBody(
+                    code=ErrorCode.BUDGET_EXCEEDED,
+                    message=(
+                        f"Session USD budget exceeded "
+                        f"({self._budget_meter.usd_used:.6f} > "
+                        f"{self._profile.budget.max_usd:.6f})."
+                    ),
+                    details={
+                        "usd_used": self._budget_meter.usd_used,
+                        "usd_max": self._profile.budget.max_usd,
+                    },
+                )
+                try:
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="blocked",
+                        data={
+                            "call_id": "budget",
+                            "tool": "budget",
+                            "code": err.code,
+                            "reason": err.message,
+                        },
+                    )
+                    _emit_budget_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        calls_used=calls_used,
+                        calls_max=calls_max,
+                        usd_used=self._budget_meter.usd_used,
+                        usd_max=self._profile.budget.max_usd,
+                    )
+                except EventBusError:
+                    pass
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="budget_exceeded",
+                    error=err,
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
             if not turn.tool_calls:
                 final_text = turn.assistant_text or ""
                 if final_text:
@@ -1038,6 +1150,7 @@ class AgentLoop:
                     session_id=session_id,
                     calls_used=calls_used,
                     calls_max=calls_max,
+                    usd_used=self._budget_meter.usd_used,
                     usd_max=self._profile.budget.max_usd,
                 )
             except EventBusError:
@@ -1062,8 +1175,30 @@ class AgentLoop:
         exec_error: ErrorBody | None = None
         start_ns = time.monotonic_ns()
 
+        pending_capture: UndoCapture | None = None
+
         def _guarded_executor(validated_args: ValidatedArguments) -> Any:
-            return executor(validated_args)
+            nonlocal pending_capture
+            if (
+                validated_args.tool == "files.write"
+                and self._undo_manager is not None
+                and self._file_reader is not None
+            ):
+                pending_capture = self._undo_manager.capture_before_write(
+                    path=str(validated_args.args["path"]),
+                    new_content=str(validated_args.args["content"]),
+                    reader=self._file_reader,
+                )
+            last_exc: Exception | None = None
+            for attempt in range(DEFAULT_MAX_TRANSIENT_RETRIES + 1):
+                try:
+                    return executor(validated_args)
+                except TimeoutError as exc:
+                    last_exc = exc
+                    if attempt >= DEFAULT_MAX_TRANSIENT_RETRIES:
+                        raise
+            assert last_exc is not None
+            raise last_exc
 
         try:
             audited: AuditedCallResult = self._coordinator.handle_call(
@@ -1072,6 +1207,8 @@ class AgentLoop:
                 executor=_guarded_executor,
                 session_state=session_state,
                 workspace_root=self._workspace_root,
+                approved_plan=self._approved_plan,
+                dry_run=self._dry_run,
             )
         except (GatewayCoordinatorError, AuditWriterError) as exc:
             return AgentLoopResult(
@@ -1088,8 +1225,12 @@ class AgentLoop:
             )
         except Exception as exc:
             exec_error = ErrorBody(
-                code=ErrorCode.UPSTREAM_ERROR,
-                message=f"Tool execution failed: {exc}",
+                code=(
+                    ErrorCode.TIMEOUT
+                    if isinstance(exc, TimeoutError)
+                    else ErrorCode.UPSTREAM_ERROR
+                ),
+                message=f"Tool execution failed: {sanitize_diagnostic_text(str(exc))}",
             )
             duration_ms = round((time.monotonic_ns() - start_ns) / 1_000_000, 3)
             new_calls_used = calls_used + 1
@@ -1110,6 +1251,7 @@ class AgentLoop:
                     session_id=session_id,
                     calls_used=new_calls_used,
                     calls_max=calls_max,
+                    usd_used=self._budget_meter.usd_used,
                     usd_max=self._profile.budget.max_usd,
                 )
             except EventBusError:
@@ -1146,6 +1288,7 @@ class AgentLoop:
                 session_id=session_id,
                 calls_used=new_calls_used,
                 calls_max=calls_max,
+                usd_used=self._budget_meter.usd_used,
                 usd_max=self._profile.budget.max_usd,
             )
 
@@ -1175,6 +1318,44 @@ class AgentLoop:
                     turns=turns,
                     audit_seqs=tuple(audit_seqs),
                 )
+
+            if decision == "dry_run":
+                if self._dry_run_manager is not None:
+                    changes = self._dry_run_manager.record_step(
+                        session_id=session_id,
+                        call=call,
+                        args_redacted=audited.preflight.args_redacted,
+                        reader=self._file_reader,
+                    )
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="dry_run_diff",
+                        data={"changes": changes},
+                    )
+                bounded_text = _bound_tool_result_text(
+                    audited.tool_result.result,
+                    self._policy.defaults.output_cap_bytes,
+                )
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": True,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                messages.append(
+                    LlmMessage(
+                        role="tool",
+                        content=bounded_text,
+                        tool_call_id=call.call_id,
+                        tool_name=call.tool,
+                    )
+                )
+                return None
 
             if decision == "ask":
                 pending = audited.preflight.pending_approval
@@ -1221,20 +1402,92 @@ class AgentLoop:
                 )
 
             # Allowed call executed via injected gateway executor
+            raw_result = audited.tool_result.result
             bounded_text = _bound_tool_result_text(
-                audited.tool_result.result,
+                raw_result,
                 self._policy.defaults.output_cap_bytes,
             )
-            _emit_event(
-                self._event_bus,
-                session_id=session_id,
-                event_type="tool_result",
-                data={
-                    "call_id": call.call_id,
-                    "ok": True,
-                    "duration_ms": duration_ms,
-                },
+            tool_failed = isinstance(raw_result, dict) and (
+                raw_result.get("ok") is False
+                or (
+                    isinstance(raw_result.get("exit_code"), int)
+                    and raw_result["exit_code"] != 0
+                )
             )
+            if tool_failed:
+                err_info = raw_result.get("error")
+                err_code = (
+                    err_info.get("code")
+                    if isinstance(err_info, dict) and err_info.get("code")
+                    else ErrorCode.UPSTREAM_ERROR
+                )
+                err_msg = (
+                    err_info.get("message")
+                    if isinstance(err_info, dict) and err_info.get("message")
+                    else f"Tool '{call.tool}' returned failure"
+                )
+                safe_msg = sanitize_diagnostic_text(str(err_msg))
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": False,
+                        "error": {"code": str(err_code), "message": safe_msg},
+                        "duration_ms": duration_ms,
+                    },
+                )
+                report = self._loop_breaker.record_failure(
+                    tool=call.tool,
+                    args_redacted=audited.preflight.args_redacted,
+                    error_code=err_code,
+                    reason=safe_msg,
+                )
+                if report is not None:
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="problem_report",
+                        data=report.model_dump(),
+                    )
+                    return AgentLoopResult(
+                        session_id=session_id,
+                        status="paused",
+                        error=ErrorBody(
+                            code=ErrorCode.LOOP_DETECTED,
+                            message=report.what_failed,
+                        ),
+                        problem_report=report,
+                        calls_used=new_calls_used,
+                        calls_max=calls_max,
+                        turns=turns,
+                        audit_seqs=tuple(audit_seqs),
+                    )
+            else:
+                self._loop_breaker.record_success(
+                    call.tool, audited.preflight.args_redacted
+                )
+                if (
+                    pending_capture is not None
+                    and self._undo_manager is not None
+                    and audited.executed
+                ):
+                    self._undo_manager.record_write(
+                        session_id=session_id,
+                        audit_seq=audited.audit_entry.seq,
+                        capture=pending_capture,
+                    )
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": True,
+                        "duration_ms": duration_ms,
+                    },
+                )
         except (EventBusError, ApprovalManagerError) as exc:
             return AgentLoopResult(
                 session_id=session_id,

@@ -375,7 +375,7 @@ def test_ws_replays_from_last_seq_streams_live_and_accepts_ping_throughput(
 
         # Accepted client heartbeat / bandwidth frames must not emit non-contract frames
         ws.send_json({"type": "ping"})
-        ws.send_json({"type": "throughput", "kbps": 1450.5})
+        ws.send_json({"type": "throughput", "kbps": 2450.5})
 
         # Persist a new event after handshake; must arrive live in seq order
         published = bus.publish(

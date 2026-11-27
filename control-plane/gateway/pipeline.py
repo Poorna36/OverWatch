@@ -47,6 +47,7 @@ from control_plane.contracts import (
     Decision,
     ErrorBody,
     ErrorCode,
+    Plan,
     Policy,
     Profile,
     SessionState,
@@ -195,6 +196,7 @@ def run_preflight(
     session_state: SessionState = "ACTIVE",
     workspace_root: Path | str = DEFAULT_WORKSPACE_ROOT,
     path_jail: PathJail | None = None,
+    approved_plan: Plan | None = None,
 ) -> GatewayPreflightResult:
     """Evaluate a contract ``ToolCall`` through policy, jail, and arg checks.
 
@@ -295,8 +297,19 @@ def run_preflight(
             tool_policy=policy_decision.tool_policy,
         )
 
+    # Step 4.5: Escalate off-plan tool calls to 'ask' (F-11), never relaxing block
+    resolved_decision = policy_decision.decision
+    resolved_reason = policy_decision.reason
+    resolved_escalated = policy_decision.escalated
+    if approved_plan is not None and resolved_decision == "allow":
+        planned_tools = {step.tool for step in approved_plan.steps}
+        if call.tool not in planned_tools:
+            resolved_decision = "ask"
+            resolved_reason = "off-plan tool call requires approval"
+            resolved_escalated = True
+
     # Step 5: Keep approval-required calls in unresolved 'ask' state
-    if policy_decision.decision == "ask":
+    if resolved_decision == "ask":
         irreversible = (
             policy_decision.tier == "sensitive" or call.tool not in _UNDOABLE_TOOLS
         )
@@ -306,7 +319,7 @@ def run_preflight(
             tool=call.tool,
             tier=policy_decision.tier,
             args_redacted=args_redacted,
-            reason=policy_decision.reason,
+            reason=resolved_reason,
             irreversible=irreversible,
         )
         return GatewayPreflightResult(
@@ -315,20 +328,20 @@ def run_preflight(
             tool=call.tool,
             decision="ask",
             tier=policy_decision.tier,
-            reason=policy_decision.reason,
+            reason=resolved_reason,
             executable=False,
             needs_approval=True,
             validated_args=None,
             args_redacted=args_redacted,
             audit_decision="asked",
             error=None,
-            escalated=policy_decision.escalated,
+            escalated=resolved_escalated,
             tool_policy=policy_decision.tool_policy,
             pending_approval=pending,
         )
 
     # Step 6: Only explicit 'allow' reaches executable=True
-    if policy_decision.decision != "allow":
+    if resolved_decision != "allow":
         return _blocked_result(
             call=call,
             tier=policy_decision.tier,
@@ -416,6 +429,7 @@ class GatewayPreflightPipeline:
         session_state: SessionState = "ACTIVE",
         workspace_root: Path | str | None = None,
         path_jail: PathJail | None = None,
+        approved_plan: Plan | None = None,
     ) -> GatewayPreflightResult:
         """Run preflight checks for ``call`` without executing any tool."""
         root = self.workspace_root if workspace_root is None else workspace_root
@@ -427,4 +441,5 @@ class GatewayPreflightPipeline:
             session_state=session_state,
             workspace_root=root,
             path_jail=jail,
+            approved_plan=approved_plan,
         )
