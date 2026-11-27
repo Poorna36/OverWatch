@@ -676,22 +676,29 @@ class SessionRunner:
             )
 
         if result.status == "awaiting_approval":
-            with self._lock:
-                ctx = self._registry.session_states.get(session_id)
-                if ctx is not None:
-                    ctx.is_running = False
-                    ctx.snapshot = None
+            pending_id = (
+                result.pending_approval.approval_id
+                if result.pending_approval is not None
+                else None
+            )
             record = SessionRunRecord(
                 session_id=session_id,
                 status="awaiting_approval",
-                pending_approval_id=(
-                    result.pending_approval.approval_id
-                    if result.pending_approval is not None
-                    else None
-                ),
+                pending_approval_id=pending_id,
             )
             with self._lock:
-                self._run_records[session_id] = record
+                # Only clear is_running / update run_records if the approval
+                # has not already been resolved and scheduled for resumption.
+                still_pending = (
+                    pending_id is not None
+                    and pending_id in self._registry.pending_approvals
+                )
+                if still_pending:
+                    ctx = self._registry.session_states.get(session_id)
+                    if ctx is not None:
+                        ctx.is_running = False
+                        ctx.snapshot = None
+                    self._run_records[session_id] = record
             return record
 
         if result.status in ("blocked", "budget_exceeded", "error"):
@@ -785,14 +792,15 @@ class SessionRunner:
                 )
             except Exception as exc:
                 self._clear_session_execution_state(session_id, terminal_status="error")
-                with contextlib.suppress(SQLAlchemyError, SessionStartupError):
-                    self._update_session_row(session_id, state="FAILED")
-                with contextlib.suppress(EventBusError):
-                    self._emit_state(
-                        session_id,
-                        "FAILED",
-                        reason=f"agent execution failed ({type(exc).__name__})",
-                    )
+                if self._get_session_state(session_id) == "ACTIVE":
+                    with contextlib.suppress(SQLAlchemyError, SessionStartupError):
+                        self._update_session_row(session_id, state="FAILED")
+                    with contextlib.suppress(EventBusError):
+                        self._emit_state(
+                            session_id,
+                            "FAILED",
+                            reason=f"agent execution failed ({type(exc).__name__})",
+                        )
                 record = SessionRunRecord(
                     session_id=session_id,
                     status="error",
@@ -859,6 +867,11 @@ class SessionRunner:
                 with self._lock:
                     self._run_records[session_id] = record
                 return record
+
+            with self._lock:
+                ctx = self._registry.session_states.get(session_id)
+                if ctx is not None:
+                    ctx.is_running = True
 
             try:
                 loop = self._build_agent_loop(started=entry.started, runtime=runtime)
