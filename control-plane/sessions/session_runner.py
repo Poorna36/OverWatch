@@ -74,6 +74,7 @@ from control_plane.sessions.container_manager import (
     SessionContainerManager,
     validate_session_id,
 )
+from control_plane.sessions.dry_run import DryRunApplyResult, DryRunManager
 from control_plane.sessions.plan_service import (
     PlanNotFoundError,
     PlanService,
@@ -127,6 +128,7 @@ class StartedSession:
     created_at: str
     llm: LlmAdapter
     plan: Plan | None = None
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -238,6 +240,7 @@ class RuntimeRegistry:
         self.run_records: dict[str, SessionRunRecord] = {}
         self.pending_approvals: dict[str, PendingApprovalEntry] = {}
         self.pending_plans: dict[str, tuple[StartedSession, str]] = {}
+        self.dry_run_manager = DryRunManager()
         self.session_states: dict[str, SessionExecutionState] = {}
         self.session_locks: dict[str, threading.Lock] = {}
         self.executor = ThreadPoolExecutor(
@@ -306,6 +309,7 @@ class SessionRunner:
         profile_name: str,
         owner_id: str,
         created_at: str,
+        dry_run: bool = False,
     ) -> None:
         with self._session_factory() as db:
             db.add(
@@ -314,7 +318,7 @@ class SessionRunner:
                     state="CREATED",
                     profile=profile_name,
                     owner_id=owner_id,
-                    dry_run=0,
+                    dry_run=1 if dry_run else 0,
                     container_id=None,
                     container_ip=None,
                     receipt_url=None,
@@ -388,11 +392,6 @@ class SessionRunner:
                 "request_text must be a non-empty string.",
                 code=ErrorCode.ARG_INVALID,
             )
-        if dry_run:
-            raise SessionValidationError(
-                "dry_run mode is not implemented.",
-                code=ErrorCode.POLICY_BLOCK,
-            )
 
         selected_profile_name = (
             "general" if profile_name is None or not profile_name else profile_name
@@ -433,6 +432,7 @@ class SessionRunner:
                 profile_name=profile.name,
                 owner_id=owner_id,
                 created_at=created_at,
+                dry_run=dry_run,
             )
             row_created = True
             self._emit_state(session_id, "CREATED", ts=created_at)
@@ -511,6 +511,7 @@ class SessionRunner:
             created_at=created_at,
             llm=llm,
             plan=generated_plan,
+            dry_run=dry_run,
         )
         if plan_preview:
             with self._lock:
@@ -606,6 +607,40 @@ class SessionRunner:
             approved_plan=started.plan,
             undo_manager=self._undo_manager,
             file_reader=lambda path: self._read_workspace_file(runtime, path),
+            dry_run=started.dry_run,
+            dry_run_manager=self._registry.dry_run_manager,
+        )
+
+    def apply_dry_run(self, *, session_id: str) -> DryRunApplyResult:
+        """Apply recorded dry-run changes with gateway, approval, and drift checks."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for dry-run apply.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        return self._registry.dry_run_manager.apply(
+            session_id=session_id,
+            coordinator=coordinator,
+            approval_manager=self._approval_manager,
+            profile=started.profile,
+            policy=started.policy,
+            executor=runtime,
+            reader=lambda path: self._read_workspace_file(runtime, path),
+            get_session_state=lambda: self._get_session_state(session_id),
+            approved_plan=started.plan,
         )
 
     @staticmethod
@@ -1493,6 +1528,7 @@ class SessionRunner:
                 runtime.close()
         with contextlib.suppress(Exception):
             self._undo_manager.clear_session_snapshots(session_id)
+        self._registry.dry_run_manager.clear_session(session_id)
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Cancel pending timers, wait for active runs, and close open runtimes."""

@@ -902,6 +902,29 @@ def undo_all_route(
     return {"undone": undone}
 
 
+@router.post("/sessions/{session_id}/dry_run/apply")
+def apply_dry_run_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, int]:
+    """Replay recorded dry-run changes with gateway, approval, and drift checks."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if not row.dry_run:
+        raise ApiError(
+            400,
+            ErrorCode.POLICY_BLOCK,
+            f"Session '{session_id}' was not started in dry_run mode.",
+        )
+    try:
+        res = session_runner.apply_dry_run(session_id=session_id)
+    except SessionRunnerError as exc:
+        status_code = 409 if exc.code == ErrorCode.SESSION_INACTIVE else 500
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"applied": res.applied, "flagged": res.flagged}
+
+
 @router.get("/sessions/{session_id}/screenshot")
 async def get_session_screenshot(
     session_id: str,

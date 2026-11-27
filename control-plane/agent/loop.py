@@ -69,6 +69,7 @@ from control_plane.gateway.path_jail import (
 from control_plane.gateway.pipeline import PreflightRejectedError, execute_if_allowed
 
 if TYPE_CHECKING:
+    from control_plane.sessions.dry_run import DryRunManager
     from control_plane.sessions.undo_manager import FileReader, UndoCapture, UndoManager
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -288,6 +289,8 @@ class AgentLoop:
         approved_plan: Plan | None = None,
         undo_manager: UndoManager | None = None,
         file_reader: FileReader | None = None,
+        dry_run: bool = False,
+        dry_run_manager: DryRunManager | None = None,
     ) -> None:
         self._llm = llm
         self._coordinator = coordinator
@@ -300,6 +303,8 @@ class AgentLoop:
         self._approved_plan = approved_plan
         self._undo_manager = undo_manager
         self._file_reader = file_reader
+        self._dry_run = dry_run
+        self._dry_run_manager = dry_run_manager
         self._loop_breaker = LoopBreaker()
 
     def run(
@@ -1118,6 +1123,7 @@ class AgentLoop:
                 session_state=session_state,
                 workspace_root=self._workspace_root,
                 approved_plan=self._approved_plan,
+                dry_run=self._dry_run,
             )
         except (GatewayCoordinatorError, AuditWriterError) as exc:
             return AgentLoopResult(
@@ -1225,6 +1231,44 @@ class AgentLoop:
                     turns=turns,
                     audit_seqs=tuple(audit_seqs),
                 )
+
+            if decision == "dry_run":
+                if self._dry_run_manager is not None:
+                    changes = self._dry_run_manager.record_step(
+                        session_id=session_id,
+                        call=call,
+                        args_redacted=audited.preflight.args_redacted,
+                        reader=self._file_reader,
+                    )
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="dry_run_diff",
+                        data={"changes": changes},
+                    )
+                bounded_text = _bound_tool_result_text(
+                    audited.tool_result.result,
+                    self._policy.defaults.output_cap_bytes,
+                )
+                _emit_event(
+                    self._event_bus,
+                    session_id=session_id,
+                    event_type="tool_result",
+                    data={
+                        "call_id": call.call_id,
+                        "ok": True,
+                        "duration_ms": duration_ms,
+                    },
+                )
+                messages.append(
+                    LlmMessage(
+                        role="tool",
+                        content=bounded_text,
+                        tool_call_id=call.call_id,
+                        tool_name=call.tool,
+                    )
+                )
+                return None
 
             if decision == "ask":
                 pending = audited.preflight.pending_approval
