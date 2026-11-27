@@ -4,28 +4,68 @@ services:
       context: .
       dockerfile: control-plane/Dockerfile
     container_name: overwatch-control-plane
+    command: ["uvicorn", "control_plane.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
     ports:
-      - "8000:8000"
+      - "${PORT:-8000}:8000"
     environment:
       - APP_TOKEN=${APP_TOKEN}
       - VAULT_KEY=${VAULT_KEY}
       - LLM_API_KEY=${LLM_API_KEY}
+      - DATABASE_URL=sqlite:////app/data/overwatch.db
+      - OVERWATCH_SQUID_ACL_PATH=/app/squid-config/sessions.conf
       - HTTP_PROXY=http://egress-proxy:3128
       - HTTPS_PROXY=http://egress-proxy:3128
+      # Docker Engine connection for session container management:
+      # - The host Docker socket (/var/run/docker.sock) is NEVER mounted.
+      # - No implicit DOCKER_HOST or TLS certificate mount is configured here.
+      # - To enable remote Docker Engine access over verified mutual TLS, opt in
+      #   with the override file:
+      #     docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+    volumes:
+      - overwatch-data:/app/data
+      - squid-config:/app/squid-config
     networks:
       - mgmt
     depends_on:
       - egress-proxy
     restart: unless-stopped
 
+  squid-init:
+    image: ubuntu/squid:5.2-22.04_beta
+    container_name: overwatch-squid-init
+    volumes:
+      - squid-config:/etc/squid/conf.d
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -f /etc/squid/conf.d/sessions.conf ]; then
+          echo "# Overwatch Squid Dynamic Session ACLs - No active sessions" > /etc/squid/conf.d/sessions.conf
+          echo "[squid-init] Created initial sessions.conf"
+        else
+          echo "[squid-init] sessions.conf already exists, preserving policy"
+        fi
+    restart: "no"
+
   egress-proxy:
     image: ubuntu/squid:5.2-22.04_beta
     container_name: overwatch-egress-proxy
+    entrypoint: ["/entrypoint.sh"]
     volumes:
       - ./infra/squid.conf:/etc/squid/squid.conf:ro
+      - ./infra/entrypoint.sh:/entrypoint.sh:ro
+      - squid-config:/etc/squid/conf.d:ro
     networks:
       - mgmt
+    depends_on:
+      squid-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+
+volumes:
+  overwatch-data:
+    name: overwatch-data
+  squid-config:
+    name: overwatch-squid-config
 
 networks:
   mgmt:

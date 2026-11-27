@@ -14,6 +14,7 @@ from control_plane.contracts import (
     ProblemFix,
     ProblemReport,
     Profile,
+    SessionSummary,
     ToolCall,
     ToolResult,
     UndoRecord,
@@ -53,6 +54,38 @@ def test_error_body():
         details={"path": "required"},
     )
     assert err_with_details.details == {"path": "required"}
+
+
+def test_session_summary():
+    summary = SessionSummary(
+        session_id="s_01J8ABCDEFGH1234567890ABCD",
+        state="ACTIVE",
+        profile="coding",
+        created_at="2026-11-27T01:00:00Z",
+    )
+    assert summary.model_dump() == {
+        "session_id": "s_01J8ABCDEFGH1234567890ABCD",
+        "state": "ACTIVE",
+        "profile": "coding",
+        "created_at": "2026-11-27T01:00:00Z",
+    }
+
+    with pytest.raises(ValidationError):
+        SessionSummary(
+            session_id="s_01J8ABCDEFGH1234567890ABCD",
+            state="ACTIVE",
+            profile="coding",
+            created_at="2026-11-27T01:00:00Z",
+            container_id="sess_123",  # type: ignore[call-arg]
+        )
+
+    with pytest.raises(ValidationError):
+        SessionSummary(
+            session_id="s_01J8ABCDEFGH1234567890ABCD",
+            state="UNKNOWN",  # type: ignore[arg-type]
+            profile="coding",
+            created_at="2026-11-27T01:00:00Z",
+        )
 
 
 def test_tool_call():
@@ -140,6 +173,13 @@ def test_policy_schema():
     assert policy.tools["terminal.run"].deny_patterns[0] == "rm -rf /"
     assert len(policy.escalations) == 2
 
+    # unknown_tool must be "block" only
+    invalid_policy = dict(policy_data)
+    invalid_policy["defaults"] = dict(policy_data["defaults"])
+    invalid_policy["defaults"]["unknown_tool"] = "allow"
+    with pytest.raises(ValidationError):
+        Policy.model_validate(invalid_policy)
+
 
 def test_profile_schema():
     profile_data = {
@@ -172,6 +212,12 @@ def test_profile_schema():
     assert profile.role == "coder"
     assert profile.resources.cpus == 2.0
     assert "github.com" in profile.egress_allowlist
+
+    # role must be one of "assistant", "coder", "routine"
+    invalid_profile = dict(profile_data)
+    invalid_profile["role"] = "superadmin"
+    with pytest.raises(ValidationError):
+        Profile.model_validate(invalid_profile)
 
 
 def test_approval_request_and_response():
@@ -210,20 +256,28 @@ def test_event_envelope():
 
 
 def test_audit_entry():
-    entry = AuditEntry(
-        seq=1,
-        session_id="s_01J8ABCDEFGH1234567890ABCD",
-        ts="2026-11-25T12:00:00Z",
-        tool="files.write",
-        args_redacted={"path": "test.txt"},
-        decision="allowed",
-        reason="OK",
-        tier="reversible",
-        prev_hash="0000000000000000000000000000000000000000000000000000000000000000",
-        hash="abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
-    )
-    assert entry.decision == "allowed"
-    assert entry.seq == 1
+    for decision in (
+        "allowed",
+        "asked",
+        "asked_approved",
+        "asked_denied",
+        "blocked",
+        "dry_run",
+    ):
+        entry = AuditEntry(
+            seq=1,
+            session_id="s_01J8ABCDEFGH1234567890ABCD",
+            ts="2026-11-25T12:00:00Z",
+            tool="files.write",
+            args_redacted={"path": "test.txt"},
+            decision=decision,
+            reason="OK",
+            tier="reversible",
+            prev_hash="0000000000000000000000000000000000000000000000000000000000000000",
+            hash="abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+        )
+        assert entry.decision == decision
+        assert entry.seq == 1
 
 
 def test_plan_and_problem_report_and_undo():

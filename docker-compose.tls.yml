@@ -1,0 +1,23 @@
+# Opt-in Compose override for remote Docker Engine access over verified mutual TLS.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d --build
+#
+# Both DOCKER_HOST and DOCKER_TLS_CERT_DIR are required and fail closed if unset;
+# there is no default remote endpoint or cert directory.
+#
+# Security requirement:
+#   A mutual-TLS Docker client certificate can grant broad daemon authority, and
+#   TLS alone does NOT provide least privilege. Because this repository does not
+#   enforce Docker daemon authorization, operators must point DOCKER_HOST at a
+#   dedicated isolated Docker host or place a suitable authorization layer in
+#   front of the daemon.
+
+services:
+  control-plane:
+    environment:
+      - DOCKER_HOST=${DOCKER_HOST:?Set DOCKER_HOST to your remote TLS Docker endpoint, e.g. tcp://docker-host.example:2376}
+      - DOCKER_TLS_VERIFY=1
+      - DOCKER_CERT_PATH=/etc/overwatch/docker-tls
+    volumes:
+      - ${DOCKER_TLS_CERT_DIR:?Set DOCKER_TLS_CERT_DIR to the host directory containing ca.pem, cert.pem, and key.pem}:/etc/overwatch/docker-tls:ro

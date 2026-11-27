@@ -1,0 +1,37 @@
+version: 1
+defaults:
+  unknown_tool: block
+  approval_timeout_s: 120
+  output_cap_bytes: 200000
+  tool_timeout_s: 30
+
+tiers:
+  read:        { decision: allow, log: true }
+  reversible:  { decision: allow, log: true, undo: capture }   # undo is STRETCH; ignored in MVP
+  sensitive:   { decision: ask }
+  forbidden:   { decision: block }
+
+tools:
+  files.list:   { tier: read,       path_jail: /workspace }
+  files.read:   { tier: read,       path_jail: /workspace }
+  files.write:  { tier: reversible, path_jail: /workspace, max_arg_bytes: 1000000 }
+  files.delete: { tier: sensitive,  path_jail: /workspace }
+  files.upload: { tier: sensitive }
+  terminal.run:
+    tier: reversible
+    timeout_s: 30
+    deny_patterns: ["rm -rf /", ":(){", "mkfs", "dd if=", "> /dev/sd"]
+  browser.open:        { tier: read }
+  browser.read_page:   { tier: read }
+  browser.screenshot:  { tier: read }
+  desktop.screenshot:  { tier: read }
+  desktop.click:       { tier: reversible }
+  desktop.type:        { tier: reversible }
+  desktop.key:         { tier: reversible }
+
+escalations:                       # evaluated after the tool tier; can only make a decision stricter
+  - when: { tool: "terminal.run", matches: "(curl|wget|ssh|scp)\\b" }
+    decision: ask
+    reason: "network tool in terminal"
+  - when: { tool: "*", output_bytes_gt: 200000 }
+    action: truncate
