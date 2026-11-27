@@ -33,6 +33,7 @@ from control_plane.contracts import (
     ApprovalRequest,
     ErrorBody,
     ErrorCode,
+    Plan,
     Policy,
     Profile,
     SessionState,
@@ -273,6 +274,7 @@ class AgentLoop:
         profile: Profile,
         prompts_base_dir: Path | str = REPO_ROOT,
         workspace_root: Path | str = DEFAULT_WORKSPACE_ROOT,
+        approved_plan: Plan | None = None,
     ) -> None:
         self._llm = llm
         self._coordinator = coordinator
@@ -282,6 +284,7 @@ class AgentLoop:
         self._profile = profile
         self._prompts_base_dir = prompts_base_dir
         self._workspace_root = workspace_root
+        self._approved_plan = approved_plan
 
     def run(
         self,
@@ -1072,6 +1075,7 @@ class AgentLoop:
                 executor=_guarded_executor,
                 session_state=session_state,
                 workspace_root=self._workspace_root,
+                approved_plan=self._approved_plan,
             )
         except (GatewayCoordinatorError, AuditWriterError) as exc:
             return AgentLoopResult(

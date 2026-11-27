@@ -162,3 +162,30 @@ class DevicePushTokenModel(Base):
     revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (Index("idx_device_push_tokens_owner", "owner_id", "revoked_at"),)
+
+
+class PlanModel(Base):
+    """Persisted F-11 plan preview and approval status."""
+
+    __tablename__ = "plans"
+
+    plan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String, ForeignKey("sessions.session_id"), nullable=False
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(String, nullable=False)
+    steps_json: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    est_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    plan_hash: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("status IN ('pending', 'approved')"),
+        nullable=False,
+        default="pending",
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (Index("idx_plans_session", "session_id"),)

@@ -28,6 +28,7 @@ from control_plane.contracts import (
     Decision,
     ErrorBody,
     ErrorCode,
+    Plan,
     Policy,
     Profile,
     SessionState,
@@ -114,6 +115,7 @@ class AuditedGatewayCoordinator:
         executor: Callable[[ValidatedArguments], Any],
         session_state: SessionState = "ACTIVE",
         workspace_root: Path | str | None = None,
+        approved_plan: Plan | None = None,
     ) -> AuditedCallResult:
         """Evaluate, audit-log, and conditionally execute a single ``ToolCall``."""
         if not callable(executor):
@@ -124,6 +126,7 @@ class AuditedGatewayCoordinator:
             profile,
             session_state=session_state,
             workspace_root=workspace_root,
+            approved_plan=approved_plan,
         )
         audit_decision = _resolve_audit_decision(preflight)
         audit_reason = _resolve_audit_reason(preflight, audit_decision)

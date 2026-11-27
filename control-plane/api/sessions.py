@@ -194,6 +194,7 @@ class _CreateSessionRequest(BaseModel):
     request_text: str
     profile: str | None = None
     dry_run: StrictBool = False
+    plan_preview: StrictBool = False
 
 
 @router.post("/sessions")
@@ -211,6 +212,7 @@ async def create_session_route(
                 request_text=payload.request_text,
                 profile_name=payload.profile,
                 dry_run=payload.dry_run,
+                plan_preview=payload.plan_preview,
             )
         )
     except SessionValidationError as exc:
@@ -218,6 +220,13 @@ async def create_session_route(
         raise ApiError(status_code, exc.code, str(exc)) from exc
     except SessionStartupError as exc:
         raise ApiError(500, exc.code, str(exc)) from exc
+
+    if started.state == "AWAITING_PLAN_APPROVAL" and started.plan is not None:
+        return {
+            "session_id": started.session_id,
+            "state": started.state,
+            "plan": started.plan.model_dump(),
+        }
 
     try:
         session_runner.dispatch_agent_run(
@@ -742,6 +751,69 @@ def end_session_route(
         ) from exc
 
     return {"state": "ENDED"}
+
+
+class _PlanApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+
+
+class _PlanEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    remove_steps: list[int]
+
+
+@router.post("/sessions/{session_id}/plan/approve")
+def approve_session_plan_route(
+    session_id: str,
+    payload: _PlanApproveRequest,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, Any]:
+    """Approve a pending F-11 plan and start agent execution."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        started = session_runner.approve_plan(
+            session_id=session_id,
+            plan_id=payload.plan_id,
+        )
+    except SessionValidationError as exc:
+        raise ApiError(400, exc.code, str(exc)) from exc
+    except SessionRunnerError as exc:
+        status_code = 409 if exc.code == ErrorCode.SESSION_INACTIVE else 500
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"state": started.state}
+
+
+@router.post("/sessions/{session_id}/plan/edit")
+def edit_session_plan_route(
+    session_id: str,
+    payload: _PlanEditRequest,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, Any]:
+    """Remove steps from a pending F-11 plan and return the updated plan."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state != "AWAITING_PLAN_APPROVAL":
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session is not awaiting plan approval (state: {row.state}).",
+        )
+    try:
+        updated = session_runner.edit_plan(
+            session_id=session_id,
+            plan_id=payload.plan_id,
+            remove_steps=payload.remove_steps,
+        )
+    except SessionValidationError as exc:
+        raise ApiError(400, exc.code, str(exc)) from exc
+    return {"plan": updated.model_dump()}
 
 
 @router.get("/sessions/{session_id}/screenshot")
