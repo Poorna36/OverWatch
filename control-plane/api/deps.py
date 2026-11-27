@@ -12,6 +12,8 @@ from typing import Any
 
 from control_plane.agent.llm import LlmAdapter
 from control_plane.agent.openai_adapter import OpenAIResponsesAdapter
+from control_plane.connectors.google_oauth import GoogleOAuthService
+from control_plane.connectors.google_tools import GoogleConnectorClient
 from control_plane.contracts import ErrorBody, ErrorCode
 from control_plane.db.session import create_db_engine, create_session_factory, init_db
 from control_plane.events.event_bus import EventBus
@@ -30,6 +32,7 @@ from control_plane.sessions.docker_client import (
 )
 from control_plane.sessions.profile_loader import ProfileLoader
 from control_plane.sessions.session_runner import RuntimeRegistry, SessionRunner
+from control_plane.vault.google_vault import GoogleConnectorVault
 from fastapi import Depends, Header
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -162,6 +165,35 @@ def get_push_notification_service(
 ) -> PushNotificationService:
     """Injectable PushNotificationService dependency."""
     return PushNotificationService(store=store, sender=sender)
+
+
+def get_google_vault(
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    clock: Any = Depends(get_stream_clock),
+) -> GoogleConnectorVault:
+    """Injectable encrypted GoogleConnectorVault dependency."""
+    return GoogleConnectorVault(session_factory=session_factory, clock=clock)
+
+
+@lru_cache(maxsize=1)
+def _default_oauth_service(
+    session_factory: sessionmaker[Session],
+) -> GoogleOAuthService:
+    return GoogleOAuthService(vault=GoogleConnectorVault(session_factory))
+
+
+def get_google_oauth_service(
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+) -> GoogleOAuthService:
+    """Injectable GoogleOAuthService dependency."""
+    return _default_oauth_service(session_factory)
+
+
+def get_google_connector_client(
+    vault: GoogleConnectorVault = Depends(get_google_vault),
+) -> GoogleConnectorClient:
+    """Injectable GoogleConnectorClient dependency."""
+    return GoogleConnectorClient(vault=vault)
 
 
 def get_approval_manager(

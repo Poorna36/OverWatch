@@ -591,7 +591,7 @@ def _wait_future(
 
 
 def test_post_sessions_validation_and_auth(api_env: dict[str, Any]) -> None:
-    """POST /api/v1/sessions enforces bearer auth, request_text, dry_run, profile."""
+    """POST /api/v1/sessions enforces bearer auth, request_text, and profile."""
     client: TestClient = api_env["client"]
     headers: dict[str, str] = api_env["headers"]
 
@@ -604,14 +604,6 @@ def test_post_sessions_validation_and_auth(api_env: dict[str, Any]) -> None:
     )
     assert empty.status_code == 400
     assert empty.json()["error"]["code"] == ErrorCode.ARG_INVALID
-
-    dry = client.post(
-        "/api/v1/sessions",
-        headers=headers,
-        json={"request_text": "do work", "dry_run": True},
-    )
-    assert dry.status_code == 400
-    assert dry.json()["error"]["code"] == ErrorCode.POLICY_BLOCK
 
     bad_profile = client.post(
         "/api/v1/sessions",

@@ -162,3 +162,89 @@ class DevicePushTokenModel(Base):
     revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
     __table_args__ = (Index("idx_device_push_tokens_owner", "owner_id", "revoked_at"),)
+
+
+class PlanModel(Base):
+    """Persisted F-11 plan preview and approval status."""
+
+    __tablename__ = "plans"
+
+    plan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String, ForeignKey("sessions.session_id"), nullable=False
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    profile: Mapped[str] = mapped_column(String, nullable=False)
+    steps_json: Mapped[str] = mapped_column(Text, nullable=False)
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    est_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    plan_hash: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("status IN ('pending', 'approved')"),
+        nullable=False,
+        default="pending",
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (Index("idx_plans_session", "session_id"),)
+
+
+class UndoRecordModel(Base):
+    """Persisted F-13 undo metadata (never stores raw file bodies)."""
+
+    __tablename__ = "undo_records"
+
+    undo_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String, ForeignKey("sessions.session_id"), nullable=False
+    )
+    audit_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool: Mapped[str] = mapped_column(String, nullable=False)
+    inverse_tool: Mapped[str] = mapped_column(String, nullable=False)
+    target_path: Mapped[str] = mapped_column(String, nullable=False)
+    prior_exists: Mapped[int] = mapped_column(Integer, nullable=False)
+    written_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("state IN ('available', 'used', 'expired')"),
+        nullable=False,
+        default="available",
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (Index("idx_undo_records_session", "session_id", "audit_seq"),)
+
+
+class ConnectionModel(Base):
+    """Encrypted OAuth connector credentials stored via VAULT_KEY (F-18)."""
+
+    __tablename__ = "connections"
+
+    connection_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    token_mode: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("token_mode IN ('session', 'linked')"),
+        nullable=False,
+        default="linked",
+    )
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("status IN ('active', 'revoked')"),
+        nullable=False,
+        default="active",
+    )
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_connections_owner_provider", "owner_id", "provider", "status"),
+    )

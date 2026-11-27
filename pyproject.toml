@@ -42,6 +42,7 @@ packages = [
     "control_plane.audit",
     "control_plane.events",
     "control_plane.notifications",
+    "control_plane.connectors",
 ]
 
 [tool.pytest.ini_options]

@@ -194,6 +194,7 @@ class _CreateSessionRequest(BaseModel):
     request_text: str
     profile: str | None = None
     dry_run: StrictBool = False
+    plan_preview: StrictBool = False
 
 
 @router.post("/sessions")
@@ -211,6 +212,7 @@ async def create_session_route(
                 request_text=payload.request_text,
                 profile_name=payload.profile,
                 dry_run=payload.dry_run,
+                plan_preview=payload.plan_preview,
             )
         )
     except SessionValidationError as exc:
@@ -218,6 +220,13 @@ async def create_session_route(
         raise ApiError(status_code, exc.code, str(exc)) from exc
     except SessionStartupError as exc:
         raise ApiError(500, exc.code, str(exc)) from exc
+
+    if started.state == "AWAITING_PLAN_APPROVAL" and started.plan is not None:
+        return {
+            "session_id": started.session_id,
+            "state": started.state,
+            "plan": started.plan.model_dump(),
+        }
 
     try:
         session_runner.dispatch_agent_run(
@@ -742,6 +751,199 @@ def end_session_route(
         ) from exc
 
     return {"state": "ENDED"}
+
+
+class _PlanApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+
+
+class _PlanEditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    remove_steps: list[int]
+
+
+@router.post("/sessions/{session_id}/plan/approve")
+def approve_session_plan_route(
+    session_id: str,
+    payload: _PlanApproveRequest,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, Any]:
+    """Approve a pending F-11 plan and start agent execution."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        started = session_runner.approve_plan(
+            session_id=session_id,
+            plan_id=payload.plan_id,
+        )
+    except SessionValidationError as exc:
+        raise ApiError(400, exc.code, str(exc)) from exc
+    except SessionRunnerError as exc:
+        status_code = 409 if exc.code == ErrorCode.SESSION_INACTIVE else 500
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"state": started.state}
+
+
+@router.post("/sessions/{session_id}/plan/edit")
+def edit_session_plan_route(
+    session_id: str,
+    payload: _PlanEditRequest,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, Any]:
+    """Remove steps from a pending F-11 plan and return the updated plan."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state != "AWAITING_PLAN_APPROVAL":
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session is not awaiting plan approval (state: {row.state}).",
+        )
+    try:
+        updated = session_runner.edit_plan(
+            session_id=session_id,
+            plan_id=payload.plan_id,
+            remove_steps=payload.remove_steps,
+        )
+    except SessionValidationError as exc:
+        raise ApiError(400, exc.code, str(exc)) from exc
+    return {"plan": updated.model_dump()}
+
+
+@router.post("/sessions/{session_id}/problem/{action}")
+def problem_action_route(
+    session_id: str,
+    action: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    event_bus: EventBus = Depends(get_event_bus),
+) -> dict[str, str]:
+    """Apply a user-selected F-14 problem report fix action on a paused session."""
+    allowed_actions = {"retry", "skip_step", "reconnect", "end_session", "edit_plan"}
+    if action not in allowed_actions:
+        raise ApiError(
+            400,
+            ErrorCode.ARG_INVALID,
+            f"Unsupported problem action {action!r}.",
+        )
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state != "PAUSED":
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not paused (state={row.state}).",
+        )
+    next_state = "ENDED" if action == "end_session" else "ACTIVE"
+    now_iso = format_utc_iso(datetime.now(UTC))
+    with session_factory() as db:
+        db_row = db.get(SessionModel, session_id)
+        if db_row is not None:
+            db_row.state = next_state
+            db_row.updated_at = now_iso
+            db.commit()
+    try:
+        event_bus.publish(
+            session_id=session_id,
+            event_type="session_state",
+            data={"state": next_state, "reason": f"problem_action:{action}"},
+            ts=now_iso,
+        )
+    except EventBusError:
+        pass
+    return {"state": next_state}
+
+
+@router.post("/sessions/{session_id}/undo/{undo_id}")
+def undo_step_route(
+    session_id: str,
+    undo_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, bool]:
+    """Undo one reversible ``files.write`` step for an owned active session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        ok = session_runner.undo_step(session_id=session_id, undo_id=undo_id)
+    except SessionRunnerError as exc:
+        status_code = (
+            409
+            if exc.code in (ErrorCode.SESSION_INACTIVE, ErrorCode.POLICY_BLOCK)
+            else 500
+        )
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"ok": ok}
+
+
+@router.post("/sessions/{session_id}/undo_all")
+def undo_all_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, int]:
+    """Undo all available reversible writes for an owned active session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        undone = session_runner.undo_all(session_id=session_id)
+    except SessionRunnerError as exc:
+        status_code = (
+            409
+            if exc.code in (ErrorCode.SESSION_INACTIVE, ErrorCode.POLICY_BLOCK)
+            else 500
+        )
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"undone": undone}
+
+
+@router.post("/sessions/{session_id}/dry_run/apply")
+def apply_dry_run_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, int]:
+    """Replay recorded dry-run changes with gateway, approval, and drift checks."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if not row.dry_run:
+        raise ApiError(
+            400,
+            ErrorCode.POLICY_BLOCK,
+            f"Session '{session_id}' was not started in dry_run mode.",
+        )
+    try:
+        res = session_runner.apply_dry_run(session_id=session_id)
+    except SessionRunnerError as exc:
+        status_code = 409 if exc.code == ErrorCode.SESSION_INACTIVE else 500
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"applied": res.applied, "flagged": res.flagged}
+
+
+@router.get("/budget/{session_id}")
+def get_session_budget_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    event_bus: EventBus = Depends(get_event_bus),
+) -> dict[str, Any]:
+    """Return the latest recorded F-17 budget meter snapshot for an owned session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    events = event_bus.replay(session_id=session_id)
+    budget_events = [e for e in events if e.type == "budget"]
+    if not budget_events:
+        return {
+            "calls_used": 0,
+            "calls_max": None,
+            "usd_used": None,
+            "usd_max": None,
+        }
+    return dict(budget_events[-1].data)
 
 
 @router.get("/sessions/{session_id}/screenshot")

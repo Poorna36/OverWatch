@@ -32,7 +32,7 @@ import secrets
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -52,6 +52,7 @@ from control_plane.audit.audit_writer import AuditWriter, format_utc_iso
 from control_plane.contracts import (
     ApprovalRequest,
     ErrorCode,
+    Plan,
     Policy,
     Profile,
     SessionState,
@@ -73,7 +74,15 @@ from control_plane.sessions.container_manager import (
     SessionContainerManager,
     validate_session_id,
 )
+from control_plane.sessions.dry_run import DryRunApplyResult, DryRunManager
+from control_plane.sessions.plan_service import (
+    PlanNotFoundError,
+    PlanService,
+    PlanValidationError,
+)
 from control_plane.sessions.profile_loader import ProfileLoader, ProfileLoaderError
+from control_plane.sessions.undo_manager import UndoError, UndoManager
+from control_plane.vault.google_vault import GoogleConnectorVault
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -119,6 +128,8 @@ class StartedSession:
     container_info: SessionContainerInfo
     created_at: str
     llm: LlmAdapter
+    plan: Plan | None = None
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -229,6 +240,8 @@ class RuntimeRegistry:
         self.futures: dict[str, Future[SessionRunRecord]] = {}
         self.run_records: dict[str, SessionRunRecord] = {}
         self.pending_approvals: dict[str, PendingApprovalEntry] = {}
+        self.pending_plans: dict[str, tuple[StartedSession, str]] = {}
+        self.dry_run_manager = DryRunManager()
         self.session_states: dict[str, SessionExecutionState] = {}
         self.session_locks: dict[str, threading.Lock] = {}
         self.executor = ThreadPoolExecutor(
@@ -257,6 +270,7 @@ class SessionRunner:
         max_workers: int = 8,
         registry: RuntimeRegistry | None = None,
         push_service: PushNotificationService | None = None,
+        undo_manager: UndoManager | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._container_manager = container_manager
@@ -269,6 +283,11 @@ class SessionRunner:
         self._clock = (lambda: datetime.now(UTC)) if clock is None else clock
         self._prompts_base_dir = prompts_base_dir
         self._push_service = push_service
+        self._undo_manager = (
+            UndoManager(session_factory, clock=self._clock)
+            if undo_manager is None
+            else undo_manager
+        )
 
         self._registry = (
             registry
@@ -291,6 +310,7 @@ class SessionRunner:
         profile_name: str,
         owner_id: str,
         created_at: str,
+        dry_run: bool = False,
     ) -> None:
         with self._session_factory() as db:
             db.add(
@@ -299,7 +319,7 @@ class SessionRunner:
                     state="CREATED",
                     profile=profile_name,
                     owner_id=owner_id,
-                    dry_run=0,
+                    dry_run=1 if dry_run else 0,
                     container_id=None,
                     container_ip=None,
                     receipt_url=None,
@@ -358,6 +378,7 @@ class SessionRunner:
         request_text: str,
         profile_name: str | None = None,
         dry_run: bool = False,
+        plan_preview: bool = False,
     ) -> StartedSession:
         """Validate inputs, provision hardened container + MCP servers, mark ACTIVE."""
         if self._registry.is_shutdown:
@@ -371,11 +392,6 @@ class SessionRunner:
             raise SessionValidationError(
                 "request_text must be a non-empty string.",
                 code=ErrorCode.ARG_INVALID,
-            )
-        if dry_run:
-            raise SessionValidationError(
-                "dry_run mode is not implemented.",
-                code=ErrorCode.POLICY_BLOCK,
             )
 
         selected_profile_name = (
@@ -410,15 +426,33 @@ class SessionRunner:
         session_id = generate_session_id(now_dt)
 
         row_created = False
+        generated_plan: Plan | None = None
         try:
             self._insert_session_row(
                 session_id=session_id,
                 profile_name=profile.name,
                 owner_id=owner_id,
                 created_at=created_at,
+                dry_run=dry_run,
             )
             row_created = True
             self._emit_state(session_id, "CREATED", ts=created_at)
+
+            if plan_preview:
+                self._update_session_row(session_id, state="PLANNING")
+                self._emit_state(session_id, "PLANNING")
+                generated_plan = PlanService(
+                    self._session_factory, clock=self._clock
+                ).create_plan(
+                    session_id=session_id,
+                    profile=profile,
+                    policy=policy,
+                )
+                self._event_bus.publish(
+                    session_id=session_id,
+                    event_type="plan",
+                    data=generated_plan,
+                )
 
             self._update_session_row(session_id, state="STARTING")
             self._emit_state(session_id, "STARTING")
@@ -447,8 +481,11 @@ class SessionRunner:
             for server_name in profile.mcp_servers:
                 runtime.start_server(server_name)
 
-            self._update_session_row(session_id, state="ACTIVE")
-            self._emit_state(session_id, "ACTIVE")
+            final_state: SessionState = (
+                "AWAITING_PLAN_APPROVAL" if plan_preview else "ACTIVE"
+            )
+            self._update_session_row(session_id, state=final_state)
+            self._emit_state(session_id, final_state)
         except Exception as exc:
             self.close_runtime(session_id)
             with contextlib.suppress(Exception):
@@ -466,15 +503,21 @@ class SessionRunner:
                 code=ErrorCode.UPSTREAM_ERROR,
             ) from exc
 
-        return StartedSession(
+        started = StartedSession(
             session_id=session_id,
-            state="ACTIVE",
+            state=final_state,
             profile=profile,
             policy=policy,
             container_info=container_info,
             created_at=created_at,
             llm=llm,
+            plan=generated_plan,
+            dry_run=dry_run,
         )
+        if plan_preview:
+            with self._lock:
+                self._registry.pending_plans[session_id] = (started, request_text)
+        return started
 
     def _get_session_lock(self, session_id: str) -> threading.Lock:
         with self._lock:
@@ -516,6 +559,27 @@ class SessionRunner:
                 self._emit_state(session_id, "FAILED", reason=reason)
         return transitioned
 
+    def _mark_paused_if_active(self, session_id: str, *, reason: str) -> bool:
+        """Atomically transition ``ACTIVE -> PAUSED`` and emit ``session_state``."""
+        now_iso = self._now_iso()
+        transitioned = False
+        with contextlib.suppress(SQLAlchemyError):
+            with self._session_factory() as db:
+                res = db.execute(
+                    update(SessionModel)
+                    .where(
+                        SessionModel.session_id == session_id,
+                        SessionModel.state == "ACTIVE",
+                    )
+                    .values(state="PAUSED", updated_at=now_iso)
+                )
+                db.commit()
+                transitioned = res.rowcount == 1
+        if transitioned:
+            with contextlib.suppress(EventBusError):
+                self._emit_state(session_id, "PAUSED", reason=reason)
+        return transitioned
+
     def _build_agent_loop(
         self,
         *,
@@ -541,7 +605,215 @@ class SessionRunner:
             profile=started.profile,
             prompts_base_dir=self._prompts_base_dir,
             workspace_root=DEFAULT_WORKSPACE_ROOT,
+            approved_plan=started.plan,
+            undo_manager=self._undo_manager,
+            file_reader=lambda path: self._read_workspace_file(runtime, path),
+            dry_run=started.dry_run,
+            dry_run_manager=self._registry.dry_run_manager,
         )
+
+    def apply_dry_run(self, *, session_id: str) -> DryRunApplyResult:
+        """Apply recorded dry-run changes with gateway, approval, and drift checks."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for dry-run apply.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        return self._registry.dry_run_manager.apply(
+            session_id=session_id,
+            coordinator=coordinator,
+            approval_manager=self._approval_manager,
+            profile=started.profile,
+            policy=started.policy,
+            executor=runtime,
+            reader=lambda path: self._read_workspace_file(runtime, path),
+            get_session_state=lambda: self._get_session_state(session_id),
+            approved_plan=started.plan,
+        )
+
+    @staticmethod
+    def _read_workspace_file(
+        runtime: SessionMcpRuntime, path: str
+    ) -> tuple[bool, str | None]:
+        from control_plane.gateway.argument_validation import ValidatedArguments
+
+        try:
+            res = runtime(ValidatedArguments(tool="files.read", args={"path": path}))
+        except Exception:  # noqa: BLE001
+            return False, None
+        if isinstance(res, dict) and isinstance(res.get("content"), str):
+            return True, res["content"]
+        return False, None
+
+    def undo_step(self, *, session_id: str, undo_id: str) -> bool:
+        """Undo one reversible ``files.write`` for an active session."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for undo.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        try:
+            return self._undo_manager.undo_step(
+                session_id=session_id,
+                undo_id=undo_id,
+                coordinator=coordinator,
+                profile=started.profile,
+                executor=runtime,
+                reader=lambda path: self._read_workspace_file(runtime, path),
+                session_state=self._get_session_state(session_id) or "ENDED",
+            )
+        except UndoError as exc:
+            raise SessionRunnerError(str(exc), code=ErrorCode.POLICY_BLOCK) from exc
+
+    def undo_all(self, *, session_id: str) -> int:
+        """Undo all available reversible writes for an active session."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for undo.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        try:
+            return self._undo_manager.undo_all(
+                session_id=session_id,
+                coordinator=coordinator,
+                profile=started.profile,
+                executor=runtime,
+                reader=lambda path: self._read_workspace_file(runtime, path),
+                session_state=self._get_session_state(session_id) or "ENDED",
+            )
+        except UndoError as exc:
+            raise SessionRunnerError(str(exc), code=ErrorCode.POLICY_BLOCK) from exc
+
+    def edit_plan(
+        self,
+        *,
+        session_id: str,
+        plan_id: str,
+        remove_steps: Sequence[int],
+    ) -> Plan:
+        """Remove steps from a pending plan, re-hash, and emit updated event."""
+        try:
+            updated = PlanService(self._session_factory, clock=self._clock).edit_plan(
+                session_id=session_id,
+                plan_id=plan_id,
+                remove_steps=remove_steps,
+            )
+        except PlanNotFoundError as exc:
+            raise SessionValidationError(str(exc), code=ErrorCode.ARG_INVALID) from exc
+        except PlanValidationError as exc:
+            raise SessionValidationError(str(exc), code=ErrorCode.ARG_INVALID) from exc
+
+        with self._lock:
+            pending = self._registry.pending_plans.get(session_id)
+            if pending is not None:
+                started, req_text = pending
+                self._registry.pending_plans[session_id] = (
+                    StartedSession(
+                        session_id=started.session_id,
+                        state=started.state,
+                        profile=started.profile,
+                        policy=started.policy,
+                        container_info=started.container_info,
+                        created_at=started.created_at,
+                        llm=started.llm,
+                        plan=updated,
+                    ),
+                    req_text,
+                )
+
+        with contextlib.suppress(EventBusError):
+            self._event_bus.publish(
+                session_id=session_id,
+                event_type="plan",
+                data=updated,
+            )
+        return updated
+
+    def approve_plan(
+        self,
+        *,
+        session_id: str,
+        plan_id: str,
+    ) -> StartedSession:
+        """Approve a pending plan, transition to ACTIVE, and dispatch agent run."""
+        current_state = self._get_session_state(session_id)
+        if current_state != "AWAITING_PLAN_APPROVAL":
+            raise SessionRunnerError(
+                f"Session is not awaiting plan approval (state: {current_state}).",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+
+        try:
+            approved = PlanService(
+                self._session_factory, clock=self._clock
+            ).approve_plan(session_id=session_id, plan_id=plan_id)
+        except PlanNotFoundError as exc:
+            raise SessionValidationError(str(exc), code=ErrorCode.ARG_INVALID) from exc
+        except PlanValidationError as exc:
+            raise SessionValidationError(str(exc), code=ErrorCode.ARG_INVALID) from exc
+
+        with self._lock:
+            pending = self._registry.pending_plans.pop(session_id, None)
+            if pending is None:
+                raise SessionRunnerError(
+                    "Missing in-memory request state for plan approval.",
+                    code=ErrorCode.SESSION_INACTIVE,
+                )
+            old_started, request_text = pending
+            active_started = StartedSession(
+                session_id=old_started.session_id,
+                state="ACTIVE",
+                profile=old_started.profile,
+                policy=old_started.policy,
+                container_info=old_started.container_info,
+                created_at=old_started.created_at,
+                llm=old_started.llm,
+                plan=approved,
+            )
+
+        self._update_session_row(session_id, state="ACTIVE")
+        self._emit_state(session_id, "ACTIVE")
+        self.dispatch_agent_run(started=active_started, request_text=request_text)
+        return active_started
 
     def _register_pending_approval(
         self,
@@ -736,9 +1008,19 @@ class SessionRunner:
                     self._run_records[session_id] = record
             return record
 
-        if result.status in ("blocked", "budget_exceeded", "error"):
+        if result.status in ("blocked", "budget_exceeded", "error", "paused"):
             self._clear_session_execution_state(
                 session_id, terminal_status=result.status
+            )
+
+        if result.status == "paused":
+            self._mark_paused_if_active(
+                session_id,
+                reason=(
+                    result.error.code
+                    if result.error is not None
+                    else ErrorCode.LOOP_DETECTED.value
+                ),
             )
 
         if result.status == "error":
@@ -1223,6 +1505,7 @@ class SessionRunner:
         timers: list[threading.Timer] = []
         with self._lock:
             runtime = self._runtimes.pop(session_id, None)
+            self._registry.pending_plans.pop(session_id, None)
             ctx = self._registry.session_states.pop(session_id, None)
             if ctx is not None:
                 ctx.is_running = False
@@ -1244,6 +1527,15 @@ class SessionRunner:
         if runtime is not None:
             with contextlib.suppress(Exception):
                 runtime.close()
+        with contextlib.suppress(Exception):
+            self._undo_manager.clear_session_snapshots(session_id)
+        self._registry.dry_run_manager.clear_session(session_id)
+        owner_id = self._get_session_owner_id(session_id)
+        if owner_id is not None:
+            with contextlib.suppress(Exception):
+                GoogleConnectorVault(
+                    self._session_factory, clock=self._clock
+                ).teardown_session_tokens(owner_id=owner_id, session_id=session_id)
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Cancel pending timers, wait for active runs, and close open runtimes."""
