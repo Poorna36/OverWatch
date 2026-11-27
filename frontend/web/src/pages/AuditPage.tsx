@@ -1,170 +1,68 @@
-import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
-import { MOCK_SESSIONS, type AuditEntry, type Decision } from '../lib/mock-data'
-import { DecisionBadge, RiskBadge, Button, Card } from '../components/ui'
-import { formatTime } from '../lib/utils'
-import { cn } from '../lib/utils'
-
-type Filter = 'all' | Decision
-
-function buildAuditEntries(sessions: typeof MOCK_SESSIONS): AuditEntry[] {
-  return sessions.flatMap(s =>
-    s.toolCalls.map((t, i) => ({
-      seq: i + 1,
-      timestamp: t.timestamp,
-      tool: t.tool,
-      decision: t.decision,
-      reason: t.reason,
-      riskTier: t.riskTier,
-      sessionId: s.id,
-    }))
-  ).sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-}
-
-function hashHead(entries: AuditEntry[]): string {
-  // Fake but realistic-looking chain head
-  return 'sha256:' + entries.length.toString(16).padStart(8, '0') + 'a3f7c2e1b8d96054'
-}
+import { useMemo, useState } from "react";
+import { Download, Link2, CheckCircle2 } from "lucide-react";
+import { mockHash, REASONS, type Decision } from "../lib/mock";
+import { useStore } from "../lib/store";
+import { Btn, Card, DecisionBadge, fmtTime } from "../components/ui";
+import { cn } from "../lib/utils";
 
 export function AuditPage() {
-  const [searchParams] = useSearchParams()
-  const sessionFilter = searchParams.get('session')
-  const [filter, setFilter] = useState<Filter>('all')
-  const [exported, setExported] = useState(false)
+  const { sessions } = useStore();
+  const [f, setF] = useState<"all" | Decision>("all");
+  const records = useMemo(() => {
+    const all = sessions.flatMap((s) => s.calls.map((c) => ({ ...c, session: s.id }))).sort((a, b) => a.ts.localeCompare(b.ts));
+    return all.reduce<Array<typeof all[number] & { prev: string; hash: string }>>((chain, r) => {
+      const prev = chain.length ? chain[chain.length - 1]!.hash : "00000000";
+      const hash = mockHash(prev + JSON.stringify(r));
+      chain.push({ ...r, prev, hash });
+      return chain;
+    }, []);
+  }, [sessions]);
+  const shown = records.filter((r) => f === "all" || r.decision === f).reverse();
 
-  const sessions = sessionFilter
-    ? MOCK_SESSIONS.filter(s => s.id === sessionFilter)
-    : MOCK_SESSIONS
-
-  const allEntries = buildAuditEntries(sessions)
-  const filtered = filter === 'all' ? allEntries : allEntries.filter(e => e.decision === filter)
-  const chainHead = hashHead(allEntries)
-
-  function exportReceipt() {
-    const receipt = {
-      generated_at: new Date().toISOString(),
-      session_count: sessions.length,
-      entry_count: allEntries.length,
-      chain_head: chainHead,
-      valid: true,
-      entries: allEntries,
-    }
-    const blob = new Blob([JSON.stringify(receipt, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `overwatch-audit-${Date.now()}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-    setExported(true)
-    setTimeout(() => setExported(false), 2000)
-  }
-
-  const counts = {
-    all: allEntries.length,
-    allow: allEntries.filter(e => e.decision === 'allow').length,
-    ask: allEntries.filter(e => e.decision === 'ask').length,
-    block: allEntries.filter(e => e.decision === 'block').length,
-  }
+  const exportJson = () => {
+    const blob = new Blob([JSON.stringify({ kind: "overwatch.audit.receipt", exportedAt: new Date().toISOString(), records }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "overwatch-audit-receipt.json"; a.click(); URL.revokeObjectURL(a.href);
+  };
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
-
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-zinc-100">Audit log</h1>
-            <p className="text-sm text-zinc-500 mt-0.5">
-              Append-only, hash-chained. {allEntries.length} entries.
-            </p>
-          </div>
-          <Button variant="outline" size="sm" onClick={exportReceipt}>
-            {exported ? '✓ Exported' : '↓ Export receipt'}
-          </Button>
-        </div>
-
-        {/* Chain status */}
-        <Card className="flex items-center gap-3 py-3">
-          <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
-            <span className="text-emerald-400 text-sm">✓</span>
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-zinc-300">Chain integrity verified</p>
-            <p className="text-xs font-mono text-zinc-600 truncate mt-0.5">{chainHead}</p>
-          </div>
-          <span className="text-xs text-emerald-400 font-medium">valid</span>
-        </Card>
-
-        {/* Filter bar */}
-        <div className="flex items-center gap-2">
-          {(['all', 'allow', 'ask', 'block'] as const).map(f => (
-            <button
-              key={f}
-              onClick={() => setFilter(f)}
-              className={cn(
-                'px-3 py-1.5 rounded-lg text-xs font-medium transition-all border',
-                filter === f
-                  ? 'bg-indigo-600/20 border-indigo-500/40 text-indigo-400'
-                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-300 hover:border-zinc-700',
-              )}
-            >
-              <span className="capitalize">{f}</span>
-              <span className="ml-1.5 text-zinc-600">{counts[f]}</span>
-            </button>
-          ))}
-        </div>
-
-        {/* Entries */}
-        <div className="space-y-1">
-          {filtered.map((entry, i) => (
-            <AuditRow key={`${entry.sessionId}-${entry.seq}`} entry={entry} index={i} />
-          ))}
-          {filtered.length === 0 && (
-            <div className="py-12 text-center text-zinc-700 text-sm">No entries match this filter</div>
-          )}
-        </div>
+    <div className="space-y-5">
+      <div className="flex items-end justify-between gap-3">
+        <h1 className="text-2xl font-bold tracking-tight">Audit</h1>
+        <Btn variant="secondary" onClick={exportJson}><Download className="size-4" /> Export receipt</Btn>
       </div>
-    </div>
-  )
-}
-
-function AuditRow({ entry, index }: { entry: AuditEntry; index: number }) {
-  const [expanded, setExpanded] = useState(false)
-
-  const borderColor = {
-    allow: 'border-l-emerald-500/40',
-    ask: 'border-l-amber-500/40',
-    block: 'border-l-rose-500/40',
-  }[entry.decision]
-
-  const seqHash = `sha256:${(index + 1).toString(16).padStart(4, '0')}…`
-
-  return (
-    <div
-      className={cn(
-        'px-3 py-2.5 rounded-lg border-l-2 bg-zinc-900/60 hover:bg-zinc-900 cursor-pointer transition-all',
-        borderColor,
-      )}
-      onClick={() => setExpanded(e => !e)}
-    >
-      <div className="flex items-center gap-3">
-        <span className="text-xs font-mono text-zinc-700 w-6 shrink-0">#{entry.seq}</span>
-        <span className="text-xs font-mono text-zinc-500 shrink-0">{formatTime(entry.timestamp)}</span>
-        <span className="text-xs font-mono text-zinc-200 flex-1 truncate">{entry.tool}</span>
-        <DecisionBadge decision={entry.decision} />
-        <RiskBadge tier={entry.riskTier} />
-      </div>
-
-      {expanded && (
-        <div className="mt-2 ml-9 space-y-1 animate-fade-in">
-          {entry.reason && (
-            <p className="text-xs font-mono text-zinc-500">{entry.reason}</p>
-          )}
-          <p className="text-[10px] font-mono text-zinc-700">{seqHash}</p>
-          <p className="text-[10px] text-zinc-700">Session: {entry.sessionId}</p>
+      <Card className="flex gap-3 border-allow/40">
+        <CheckCircle2 className="size-5 shrink-0 text-allow" />
+        <div className="text-sm">
+          <p className="font-semibold">Hash chain verified</p>
+          <p className="text-muted-foreground">{records.length} records chained in order.</p>
         </div>
-      )}
+      </Card>
+      <div className="flex gap-2 overflow-x-auto" role="tablist">
+        {(["all", "allow", "ask", "block"] as const).map((k) => (
+          <button key={k} role="tab" aria-selected={f === k} onClick={() => setF(k)} className={cn("min-h-10 shrink-0 rounded-full border px-4 font-mono text-xs uppercase", f === k ? "border-primary bg-accent text-foreground" : "text-muted-foreground")}>
+            {k} {k !== "all" && <span className="opacity-60">{records.filter((r) => r.decision === k).length}</span>}
+          </button>
+        ))}
+      </div>
+      <ol className="relative space-y-3 border-l pl-5">
+        {shown.map((r) => (
+          <li key={r.session + r.seq} className="animate-ow-in relative">
+            <span className="absolute -left-[26px] top-3 size-2.5 rounded-full border-2 border-background bg-primary" />
+            <Card className="p-3">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-sm font-semibold">{r.tool}</span>
+                <DecisionBadge d={r.decision} />
+              </div>
+              <p className="mt-1 text-xs"><span className="font-mono">{r.reason}</span> <span className="text-muted-foreground">— {REASONS[r.reason]}</span></p>
+              <p className="mt-2 flex flex-wrap items-center gap-x-3 font-mono text-[11px] text-muted-foreground">
+                <span>{fmtTime(r.ts)}</span><span>{r.session}#{r.seq}</span>
+                <span className="flex items-center gap-1"><Link2 className="size-3" />{r.prev.slice(0, 6)}→{r.hash.slice(0, 6)}</span>
+              </p>
+            </Card>
+          </li>
+        ))}
+        {shown.length === 0 && <p className="text-sm text-muted-foreground">No records for this filter.</p>}
+      </ol>
     </div>
-  )
+  );
 }
