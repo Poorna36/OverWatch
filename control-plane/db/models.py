@@ -216,3 +216,35 @@ class UndoRecordModel(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (Index("idx_undo_records_session", "session_id", "audit_seq"),)
+
+
+class ConnectionModel(Base):
+    """Encrypted OAuth connector credentials stored via VAULT_KEY (F-18)."""
+
+    __tablename__ = "connections"
+
+    connection_id: Mapped[str] = mapped_column(String, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False)
+    token_mode: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("token_mode IN ('session', 'linked')"),
+        nullable=False,
+        default="linked",
+    )
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    secret_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("status IN ('active', 'revoked')"),
+        nullable=False,
+        default="active",
+    )
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        Index("idx_connections_owner_provider", "owner_id", "provider", "status"),
+    )

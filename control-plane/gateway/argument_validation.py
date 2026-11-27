@@ -167,6 +167,50 @@ class DesktopKeyArgs(_StrictArgsModel):
         return value
 
 
+class CalendarListEventsArgs(_StrictArgsModel):
+    time_min: str | None = None
+    time_max: str | None = None
+    max_results: int = Field(default=10, ge=1, le=50)
+
+
+class CalendarCreateEventArgs(_StrictArgsModel):
+    summary: str = Field(min_length=1, max_length=256)
+    start: str = Field(min_length=1, max_length=64)
+    end: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class CalendarUpdateEventArgs(_StrictArgsModel):
+    event_id: str = Field(min_length=1, max_length=256)
+    summary: str | None = Field(default=None, min_length=1, max_length=256)
+    start: str | None = Field(default=None, min_length=1, max_length=64)
+    end: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class CalendarDeleteEventArgs(_StrictArgsModel):
+    event_id: str = Field(min_length=1, max_length=256)
+
+
+class GmailSearchArgs(_StrictArgsModel):
+    query: str = Field(min_length=1, max_length=512)
+    max_results: int = Field(default=10, ge=1, le=50)
+
+
+class GmailReadMessageArgs(_StrictArgsModel):
+    message_id: str = Field(min_length=1, max_length=256)
+
+
+class GmailCreateDraftArgs(_StrictArgsModel):
+    to: str = Field(min_length=3, max_length=256)
+    subject: str = Field(min_length=1, max_length=256)
+    body: str = Field(min_length=1, max_length=10000)
+
+
+class GmailSendArgs(_StrictArgsModel):
+    draft_id: str = Field(min_length=1, max_length=256)
+
+
 _TOOL_ARG_MODELS: dict[str, type[_StrictArgsModel]] = {
     "files.list": FilesListArgs,
     "files.read": FilesReadArgs,
@@ -181,6 +225,14 @@ _TOOL_ARG_MODELS: dict[str, type[_StrictArgsModel]] = {
     "desktop.click": DesktopClickArgs,
     "desktop.type": DesktopTypeArgs,
     "desktop.key": DesktopKeyArgs,
+    "calendar.list_events": CalendarListEventsArgs,
+    "calendar.create_event": CalendarCreateEventArgs,
+    "calendar.update_event": CalendarUpdateEventArgs,
+    "calendar.delete_event": CalendarDeleteEventArgs,
+    "gmail.search": GmailSearchArgs,
+    "gmail.read_message": GmailReadMessageArgs,
+    "gmail.create_draft": GmailCreateDraftArgs,
+    "gmail.send": GmailSendArgs,
 }
 
 # Workspace path fields per tool (all paths relative to /workspace per CONTRACTS.md §4)

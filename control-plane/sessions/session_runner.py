@@ -82,6 +82,7 @@ from control_plane.sessions.plan_service import (
 )
 from control_plane.sessions.profile_loader import ProfileLoader, ProfileLoaderError
 from control_plane.sessions.undo_manager import UndoError, UndoManager
+from control_plane.vault.google_vault import GoogleConnectorVault
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -1529,6 +1530,12 @@ class SessionRunner:
         with contextlib.suppress(Exception):
             self._undo_manager.clear_session_snapshots(session_id)
         self._registry.dry_run_manager.clear_session(session_id)
+        owner_id = self._get_session_owner_id(session_id)
+        if owner_id is not None:
+            with contextlib.suppress(Exception):
+                GoogleConnectorVault(
+                    self._session_factory, clock=self._clock
+                ).teardown_session_tokens(owner_id=owner_id, session_id=session_id)
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Cancel pending timers, wait for active runs, and close open runtimes."""

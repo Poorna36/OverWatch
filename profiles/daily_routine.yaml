@@ -1,0 +1,12 @@
+name: daily_routine
+role: routine
+system_prompt_file: prompts/routine.md
+image: pocket/py-node:1.0
+resources: { cpus: 1.0, memory: 1g, pids: 256, ttl_minutes: 30 }
+budget: { max_tool_calls: 100, max_usd: 0.50 }
+mcp_servers:
+  calendar: {}
+  gmail: {}
+egress_allowlist: [www.googleapis.com, oauth2.googleapis.com]
+tool_overrides:
+  gmail.send: { tier: forbidden }

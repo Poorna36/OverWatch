@@ -28,6 +28,14 @@ tools:
   desktop.click:       { tier: reversible }
   desktop.type:        { tier: reversible }
   desktop.key:         { tier: reversible }
+  calendar.list_events:  { tier: read }
+  calendar.create_event: { tier: reversible }
+  calendar.update_event: { tier: reversible }
+  calendar.delete_event: { tier: sensitive }
+  gmail.search:          { tier: read }
+  gmail.read_message:    { tier: read }
+  gmail.create_draft:    { tier: reversible }
+  gmail.send:            { tier: forbidden }
 
 escalations:                       # evaluated after the tool tier; can only make a decision stricter
   - when: { tool: "terminal.run", matches: "(curl|wget|ssh|scp)\\b" }
