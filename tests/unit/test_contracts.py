@@ -140,6 +140,13 @@ def test_policy_schema():
     assert policy.tools["terminal.run"].deny_patterns[0] == "rm -rf /"
     assert len(policy.escalations) == 2
 
+    # unknown_tool must be "block" only
+    invalid_policy = dict(policy_data)
+    invalid_policy["defaults"] = dict(policy_data["defaults"])
+    invalid_policy["defaults"]["unknown_tool"] = "allow"
+    with pytest.raises(ValidationError):
+        Policy.model_validate(invalid_policy)
+
 
 def test_profile_schema():
     profile_data = {
@@ -172,6 +179,12 @@ def test_profile_schema():
     assert profile.role == "coder"
     assert profile.resources.cpus == 2.0
     assert "github.com" in profile.egress_allowlist
+
+    # role must be one of "assistant", "coder", "routine"
+    invalid_profile = dict(profile_data)
+    invalid_profile["role"] = "superadmin"
+    with pytest.raises(ValidationError):
+        Profile.model_validate(invalid_profile)
 
 
 def test_approval_request_and_response():

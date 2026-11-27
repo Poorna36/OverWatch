@@ -96,7 +96,7 @@ class ToolResult(BaseModel):
 class PolicyDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    unknown_tool: Decision = "block"
+    unknown_tool: Literal["block"] = "block"
     approval_timeout_s: int = 120
     output_cap_bytes: int = 200000
     tool_timeout_s: int = 30
@@ -158,11 +158,14 @@ class ProfileBudget(BaseModel):
     max_usd: float = 1.00
 
 
+ProfileRole = Literal["assistant", "coder", "routine"]
+
+
 class Profile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    role: str  # "assistant" | "coder" | "routine"
+    role: ProfileRole
     system_prompt_file: str | None = None
     image: str
     resources: ProfileResources = Field(default_factory=ProfileResources)
