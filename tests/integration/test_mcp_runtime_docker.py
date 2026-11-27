@@ -171,6 +171,10 @@ def test_session_mcp_runtime_executes_hardened_container_tools(
 
         assert set(runtime.active_servers) == {"files", "terminal", "desktop"}
         assert "browser" in MCP_SERVER_COMMANDS
+
+        jpeg_bytes = runtime.capture_screenshot_jpeg()
+        assert jpeg_bytes.startswith(b"\xff\xd8\xff")
+        assert len(jpeg_bytes) > 100
     finally:
         runtime.close()
         engine.dispose()

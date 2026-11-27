@@ -483,6 +483,34 @@ class ContainerPathJail(PathJail):
         return Path(base if rel == "." else base / rel)
 
 
+_MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
+_JPEG_MAGIC = b"\xff\xd8\xff"
+_SCREENSHOT_CAPTURE_ARGV: tuple[str, ...] = (
+    "python3",
+    "-c",
+    (
+        "import os, subprocess, sys, tempfile\n"
+        "with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as f:\n"
+        "    path = f.name\n"
+        "try:\n"
+        "    rc = subprocess.run(\n"
+        "        ['scrot', '-o', '--', path],\n"
+        "        check=False,\n"
+        "        stdout=subprocess.DEVNULL,\n"
+        "        stderr=subprocess.PIPE,\n"
+        "    )\n"
+        "    if rc.returncode != 0:\n"
+        "        sys.stderr.buffer.write(rc.stderr)\n"
+        "        sys.exit(rc.returncode)\n"
+        "    with open(path, 'rb') as img:\n"
+        "        sys.stdout.buffer.write(img.read())\n"
+        "finally:\n"
+        "    if os.path.exists(path):\n"
+        "        os.unlink(path)\n"
+    ),
+)
+
+
 class SessionMcpRuntime:
     """Manages persistent Docker-exec stdio MCP sessions for one sandbox container."""
 
@@ -642,6 +670,47 @@ class SessionMcpRuntime:
         exit_code = info.get("ExitCode")
         return int(exit_code) if isinstance(exit_code, int) else 1
 
+    def _run_exec_capture(
+        self,
+        container_id: str,
+        argv: Sequence[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> tuple[int, bytes]:
+        """Run a short fixed-argv command inside container and capture stdout."""
+        try:
+            created = self._client.api.exec_create(
+                container_id,
+                list(argv),
+                stdin=False,
+                stdout=True,
+                stderr=False,
+                tty=False,
+                privileged=False,
+                user=DEFAULT_CONTAINER_USER,
+                environment=env,
+                workdir=DEFAULT_CONTAINER_WORKDIR,
+            )
+            exec_id = created["Id"]
+            output = self._client.api.exec_start(exec_id, detach=False, tty=False)
+            info = self._client.api.exec_inspect(exec_id)
+        except (docker.errors.APIError, KeyError, TypeError) as exc:
+            raise McpTransportError(
+                f"Docker exec capture failed for {argv[0]!r}: {exc}"
+            ) from exc
+
+        exit_code = info.get("ExitCode")
+        code = int(exit_code) if isinstance(exit_code, int) else 1
+        if output is None:
+            raw = b""
+        elif isinstance(output, (bytes, bytearray)):
+            raw = bytes(output)
+        else:
+            raise McpTransportError(
+                f"Unexpected exec output type from {argv[0]!r}: {type(output).__name__}"
+            )
+        return code, raw
+
     def _start_detached_exec(
         self,
         container_id: str,
@@ -745,6 +814,35 @@ class SessionMcpRuntime:
 
             self._desktop_ready = True
             return self._display
+
+    def capture_screenshot_jpeg(self) -> bytes:
+        """Capture a live JPEG screenshot from the session container's display."""
+        with self._lock:
+            if self._closed:
+                raise McpRuntimeClosedError()
+            display = self.ensure_desktop_display()
+            container_id = self.verify_container()
+
+        exit_code, raw = self._run_exec_capture(
+            container_id,
+            _SCREENSHOT_CAPTURE_ARGV,
+            env={"DISPLAY": display},
+        )
+        if exit_code != 0:
+            raise McpTransportError(
+                f"Screenshot capture failed inside container '{self._container_ref}' "
+                f"(exit={exit_code})."
+            )
+        if (
+            not raw
+            or len(raw) > _MAX_SCREENSHOT_BYTES
+            or not raw.startswith(_JPEG_MAGIC)
+        ):
+            raise McpTransportError(
+                f"Container '{self._container_ref}' returned invalid JPEG "
+                "screenshot data."
+            )
+        return raw
 
     def _validate_server_allowed(self, server_name: str) -> tuple[str, ...]:
         if server_name not in self._profile.mcp_servers:

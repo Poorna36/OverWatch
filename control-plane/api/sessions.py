@@ -20,11 +20,17 @@ from control_plane.api.deps import (
     require_owner_id,
 )
 from control_plane.api.stream import ACTIVE_STREAM_STATES, get_stream_clock
-from control_plane.api.stream_tokens import StreamTokenError, issue_stream_token
+from control_plane.api.stream_tokens import (
+    StreamTokenError,
+    issue_stream_token,
+    issue_view_token,
+    verify_view_token,
+)
 from control_plane.audit.audit_writer import format_utc_iso
 from control_plane.contracts import ErrorCode, SessionSummary
 from control_plane.db.models import SessionModel
 from control_plane.events.event_bus import EventBus, EventBusError
+from control_plane.gateway.mcp_runtime import McpRuntimeError
 from control_plane.sessions.container_manager import (
     ContainerManagerError,
     SessionContainerManager,
@@ -35,7 +41,7 @@ from control_plane.sessions.session_runner import (
     SessionStartupError,
     SessionValidationError,
 )
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -47,15 +53,21 @@ _WS_SCHEME_MAP: dict[str, str] = {
     "http": "ws",
     "https": "wss",
 }
+_HTTP_SCHEME_MAP: dict[str, str] = {
+    "http": "http",
+    "https": "https",
+}
 
 
-def build_stream_ws_url(
+def _build_public_session_url(
     public_base_url: str | None,
     *,
     session_id: str,
+    suffix: str,
     token: str,
+    scheme_map: dict[str, str],
 ) -> str:
-    """Validate ``public_base_url`` and build the authenticated WebSocket stream URL."""
+    """Validate ``public_base_url`` and build a tokenized session URL."""
     if not isinstance(public_base_url, str) or not public_base_url.strip():
         raise ApiError(
             500,
@@ -73,8 +85,8 @@ def build_stream_ws_url(
         )
 
     parsed = urlsplit(public_base_url)
-    ws_scheme = _WS_SCHEME_MAP.get(parsed.scheme.lower())
-    if ws_scheme is None or not parsed.netloc or not parsed.hostname:
+    target_scheme = scheme_map.get(parsed.scheme.lower())
+    if target_scheme is None or not parsed.netloc or not parsed.hostname:
         raise ApiError(
             500,
             ErrorCode.UPSTREAM_ERROR,
@@ -96,7 +108,42 @@ def build_stream_ws_url(
         )
 
     base_path = parsed.path.rstrip("/")
-    return f"{ws_scheme}://{parsed.netloc}{base_path}/api/v1/sessions/{session_id}/stream?token={token}"
+    return (
+        f"{target_scheme}://{parsed.netloc}{base_path}"
+        f"/api/v1/sessions/{session_id}/{suffix}?token={token}"
+    )
+
+
+def build_stream_ws_url(
+    public_base_url: str | None,
+    *,
+    session_id: str,
+    token: str,
+) -> str:
+    """Validate ``public_base_url`` and build the authenticated WebSocket stream URL."""
+    return _build_public_session_url(
+        public_base_url,
+        session_id=session_id,
+        suffix="stream",
+        token=token,
+        scheme_map=_WS_SCHEME_MAP,
+    )
+
+
+def build_view_url(
+    public_base_url: str | None,
+    *,
+    session_id: str,
+    token: str,
+) -> str:
+    """Validate ``public_base_url`` and build the authenticated live-view URL."""
+    return _build_public_session_url(
+        public_base_url,
+        session_id=session_id,
+        suffix="view",
+        token=token,
+        scheme_map=_HTTP_SCHEME_MAP,
+    )
 
 
 def _parse_created_at_utc(raw: str) -> datetime:
@@ -259,27 +306,38 @@ def get_session_detail(
                 ErrorCode.AUTH_ERROR,
                 "Authentication is not configured.",
             )
+        now = clock()
         try:
-            token = issue_stream_token(
+            stream_token = issue_stream_token(
                 session_id=row.session_id,
                 owner_id=owner_id,
                 signing_key=configured_token,
-                now=clock(),
+                now=now,
+            )
+            view_token = issue_view_token(
+                session_id=row.session_id,
+                owner_id=owner_id,
+                signing_key=configured_token,
+                now=now,
             )
         except StreamTokenError as exc:
             raise ApiError(
                 500,
                 ErrorCode.UPSTREAM_ERROR,
-                f"Failed to issue stream token: {exc}",
+                f"Failed to issue session access token: {exc}",
             ) from exc
 
         payload["stream_url"] = build_stream_ws_url(
             public_base_url,
             session_id=row.session_id,
-            token=token,
+            token=stream_token,
+        )
+        payload["view_url"] = build_view_url(
+            public_base_url,
+            session_id=row.session_id,
+            token=view_token,
         )
 
-    # view_url is omitted until the live-view proxy is implemented.
     return payload
 
 
@@ -653,3 +711,89 @@ def end_session_route(
         ) from exc
 
     return {"state": "ENDED"}
+
+
+@router.get("/sessions/{session_id}/view")
+def get_session_live_view(
+    session_id: str,
+    token: str = Query(default=""),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    configured_token: str | None = Depends(get_app_token),
+    clock: Callable[[], datetime] = Depends(get_stream_clock),
+) -> Response:
+    """Validate a scoped view token; live KasmVNC proxy fails closed on isolation."""
+    if not configured_token:
+        raise ApiError(
+            401,
+            ErrorCode.AUTH_ERROR,
+            "Authentication is not configured.",
+        )
+
+    try:
+        claims = verify_view_token(
+            token,
+            expected_session_id=session_id,
+            signing_key=configured_token,
+            now=clock(),
+        )
+    except StreamTokenError as exc:
+        raise ApiError(
+            401,
+            ErrorCode.AUTH_ERROR,
+            f"Invalid view token: {exc}",
+        ) from exc
+
+    row = _load_owned_session_row(session_factory, session_id, claims.owner_id)
+    if row.state not in ACTIVE_STREAM_STATES:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not active (state={row.state}).",
+        )
+
+    raise ApiError(
+        501,
+        ErrorCode.UPSTREAM_ERROR,
+        "Live KasmVNC view proxy is unavailable under isolated session "
+        "networking; use the screenshot fallback.",
+    )
+
+
+@router.get("/sessions/{session_id}/screenshot")
+async def get_session_screenshot(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> Response:
+    """Capture and return a live JPEG screenshot for an owned active session."""
+    row = _load_owned_session_row(session_factory, session_id, owner_id)
+    if row.state not in ACTIVE_STREAM_STATES:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not active (state={row.state}).",
+        )
+
+    runtime = session_runner.get_runtime(session_id)
+    if runtime is None:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' runtime is not active.",
+        )
+
+    try:
+        jpeg_bytes = await anyio.to_thread.run_sync(runtime.capture_screenshot_jpeg)
+    except McpRuntimeError as exc:
+        raise ApiError(
+            502,
+            ErrorCode.UPSTREAM_ERROR,
+            f"Failed to capture session screenshot: {exc}",
+        ) from exc
+
+    return Response(
+        content=jpeg_bytes,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
