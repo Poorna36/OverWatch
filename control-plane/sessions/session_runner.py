@@ -80,6 +80,7 @@ from control_plane.sessions.plan_service import (
     PlanValidationError,
 )
 from control_plane.sessions.profile_loader import ProfileLoader, ProfileLoaderError
+from control_plane.sessions.undo_manager import UndoError, UndoManager
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -265,6 +266,7 @@ class SessionRunner:
         max_workers: int = 8,
         registry: RuntimeRegistry | None = None,
         push_service: PushNotificationService | None = None,
+        undo_manager: UndoManager | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._container_manager = container_manager
@@ -277,6 +279,11 @@ class SessionRunner:
         self._clock = (lambda: datetime.now(UTC)) if clock is None else clock
         self._prompts_base_dir = prompts_base_dir
         self._push_service = push_service
+        self._undo_manager = (
+            UndoManager(session_factory, clock=self._clock)
+            if undo_manager is None
+            else undo_manager
+        )
 
         self._registry = (
             registry
@@ -597,7 +604,88 @@ class SessionRunner:
             prompts_base_dir=self._prompts_base_dir,
             workspace_root=DEFAULT_WORKSPACE_ROOT,
             approved_plan=started.plan,
+            undo_manager=self._undo_manager,
+            file_reader=lambda path: self._read_workspace_file(runtime, path),
         )
+
+    @staticmethod
+    def _read_workspace_file(
+        runtime: SessionMcpRuntime, path: str
+    ) -> tuple[bool, str | None]:
+        from control_plane.gateway.argument_validation import ValidatedArguments
+
+        try:
+            res = runtime(ValidatedArguments(tool="files.read", args={"path": path}))
+        except Exception:  # noqa: BLE001
+            return False, None
+        if isinstance(res, dict) and isinstance(res.get("content"), str):
+            return True, res["content"]
+        return False, None
+
+    def undo_step(self, *, session_id: str, undo_id: str) -> bool:
+        """Undo one reversible ``files.write`` for an active session."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for undo.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        try:
+            return self._undo_manager.undo_step(
+                session_id=session_id,
+                undo_id=undo_id,
+                coordinator=coordinator,
+                profile=started.profile,
+                executor=runtime,
+                reader=lambda path: self._read_workspace_file(runtime, path),
+                session_state=self._get_session_state(session_id) or "ENDED",
+            )
+        except UndoError as exc:
+            raise SessionRunnerError(str(exc), code=ErrorCode.POLICY_BLOCK) from exc
+
+    def undo_all(self, *, session_id: str) -> int:
+        """Undo all available reversible writes for an active session."""
+        with self._lock:
+            runtime = self._runtimes.get(session_id)
+            ctx = self._registry.session_states.get(session_id)
+        if runtime is None or ctx is None:
+            raise SessionRunnerError(
+                "Session runtime is unavailable for undo.",
+                code=ErrorCode.SESSION_INACTIVE,
+            )
+        started = ctx.started
+        workspace_jail = runtime.build_workspace_path_jail()
+        coordinator = AuditedGatewayCoordinator(
+            pipeline=GatewayPreflightPipeline(
+                started.policy,
+                workspace_root=DEFAULT_WORKSPACE_ROOT,
+                path_jail=workspace_jail,
+            ),
+            audit_writer=AuditWriter(self._session_factory),
+        )
+        try:
+            return self._undo_manager.undo_all(
+                session_id=session_id,
+                coordinator=coordinator,
+                profile=started.profile,
+                executor=runtime,
+                reader=lambda path: self._read_workspace_file(runtime, path),
+                session_state=self._get_session_state(session_id) or "ENDED",
+            )
+        except UndoError as exc:
+            raise SessionRunnerError(str(exc), code=ErrorCode.POLICY_BLOCK) from exc
 
     def edit_plan(
         self,
@@ -1403,6 +1491,8 @@ class SessionRunner:
         if runtime is not None:
             with contextlib.suppress(Exception):
                 runtime.close()
+        with contextlib.suppress(Exception):
+            self._undo_manager.clear_session_snapshots(session_id)
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Cancel pending timers, wait for active runs, and close open runtimes."""

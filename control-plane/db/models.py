@@ -189,3 +189,30 @@ class PlanModel(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
 
     __table_args__ = (Index("idx_plans_session", "session_id"),)
+
+
+class UndoRecordModel(Base):
+    """Persisted F-13 undo metadata (never stores raw file bodies)."""
+
+    __tablename__ = "undo_records"
+
+    undo_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String, ForeignKey("sessions.session_id"), nullable=False
+    )
+    audit_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool: Mapped[str] = mapped_column(String, nullable=False)
+    inverse_tool: Mapped[str] = mapped_column(String, nullable=False)
+    target_path: Mapped[str] = mapped_column(String, nullable=False)
+    prior_exists: Mapped[int] = mapped_column(Integer, nullable=False)
+    written_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(
+        String,
+        CheckConstraint("state IN ('available', 'used', 'expired')"),
+        nullable=False,
+        default="available",
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (Index("idx_undo_records_session", "session_id", "audit_seq"),)

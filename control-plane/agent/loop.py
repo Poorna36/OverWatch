@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from control_plane.agent.failure_handler import (
     DEFAULT_MAX_TRANSIENT_RETRIES,
@@ -67,6 +67,9 @@ from control_plane.gateway.path_jail import (
     PathJailError,
 )
 from control_plane.gateway.pipeline import PreflightRejectedError, execute_if_allowed
+
+if TYPE_CHECKING:
+    from control_plane.sessions.undo_manager import FileReader, UndoCapture, UndoManager
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -283,6 +286,8 @@ class AgentLoop:
         prompts_base_dir: Path | str = REPO_ROOT,
         workspace_root: Path | str = DEFAULT_WORKSPACE_ROOT,
         approved_plan: Plan | None = None,
+        undo_manager: UndoManager | None = None,
+        file_reader: FileReader | None = None,
     ) -> None:
         self._llm = llm
         self._coordinator = coordinator
@@ -293,6 +298,8 @@ class AgentLoop:
         self._prompts_base_dir = prompts_base_dir
         self._workspace_root = workspace_root
         self._approved_plan = approved_plan
+        self._undo_manager = undo_manager
+        self._file_reader = file_reader
         self._loop_breaker = LoopBreaker()
 
     def run(
@@ -1078,7 +1085,20 @@ class AgentLoop:
         exec_error: ErrorBody | None = None
         start_ns = time.monotonic_ns()
 
+        pending_capture: UndoCapture | None = None
+
         def _guarded_executor(validated_args: ValidatedArguments) -> Any:
+            nonlocal pending_capture
+            if (
+                validated_args.tool == "files.write"
+                and self._undo_manager is not None
+                and self._file_reader is not None
+            ):
+                pending_capture = self._undo_manager.capture_before_write(
+                    path=str(validated_args.args["path"]),
+                    new_content=str(validated_args.args["content"]),
+                    reader=self._file_reader,
+                )
             last_exc: Exception | None = None
             for attempt in range(DEFAULT_MAX_TRANSIENT_RETRIES + 1):
                 try:
@@ -1317,6 +1337,16 @@ class AgentLoop:
                 self._loop_breaker.record_success(
                     call.tool, audited.preflight.args_redacted
                 )
+                if (
+                    pending_capture is not None
+                    and self._undo_manager is not None
+                    and audited.executed
+                ):
+                    self._undo_manager.record_write(
+                        session_id=session_id,
+                        audit_seq=audited.audit_entry.seq,
+                        capture=pending_capture,
+                    )
                 _emit_event(
                     self._event_bus,
                     session_id=session_id,

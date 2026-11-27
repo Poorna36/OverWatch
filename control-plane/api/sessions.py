@@ -859,6 +859,49 @@ def problem_action_route(
     return {"state": next_state}
 
 
+@router.post("/sessions/{session_id}/undo/{undo_id}")
+def undo_step_route(
+    session_id: str,
+    undo_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, bool]:
+    """Undo one reversible ``files.write`` step for an owned active session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        ok = session_runner.undo_step(session_id=session_id, undo_id=undo_id)
+    except SessionRunnerError as exc:
+        status_code = (
+            409
+            if exc.code in (ErrorCode.SESSION_INACTIVE, ErrorCode.POLICY_BLOCK)
+            else 500
+        )
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"ok": ok}
+
+
+@router.post("/sessions/{session_id}/undo_all")
+def undo_all_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+) -> dict[str, int]:
+    """Undo all available reversible writes for an owned active session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    try:
+        undone = session_runner.undo_all(session_id=session_id)
+    except SessionRunnerError as exc:
+        status_code = (
+            409
+            if exc.code in (ErrorCode.SESSION_INACTIVE, ErrorCode.POLICY_BLOCK)
+            else 500
+        )
+        raise ApiError(status_code, exc.code, str(exc)) from exc
+    return {"undone": undone}
+
+
 @router.get("/sessions/{session_id}/screenshot")
 async def get_session_screenshot(
     session_id: str,
