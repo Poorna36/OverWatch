@@ -19,13 +19,9 @@ from typing import Any, Literal
 STREAM_TOKEN_TTL_SECONDS = 15 * 60
 STREAM_TOKEN_VERSION = "v1"
 STREAM_TOKEN_SCOPE = "stream"
-VIEW_TOKEN_SCOPE = "view"
 _SIGNING_DOMAIN = b"overwatch:ws-stream-token:v1"
-_VIEW_SIGNING_DOMAIN = b"overwatch:live-view-token:v1"
 _MAX_CLOCK_SKEW_SECONDS = 60
 _FORBIDDEN_ID_CHARS = frozenset("\x00\n\r\t ")
-
-TokenScope = Literal["stream", "view"]
 
 
 class StreamTokenError(Exception):
@@ -34,11 +30,11 @@ class StreamTokenError(Exception):
 
 @dataclass(frozen=True)
 class StreamTokenClaims:
-    """Verified claims extracted from a valid stream or view token."""
+    """Verified claims extracted from a valid stream token."""
 
     session_id: str
     owner_id: str
-    scope: TokenScope
+    scope: Literal["stream"]
     iat: int
     exp: int
 
@@ -57,16 +53,12 @@ def _b64url_decode(encoded: str) -> bytes:
         raise StreamTokenError("Invalid stream token encoding.") from exc
 
 
-def _derive_hmac_key(
-    signing_key: str,
-    *,
-    signing_domain: bytes = _SIGNING_DOMAIN,
-) -> bytes:
+def _derive_hmac_key(signing_key: str) -> bytes:
     if not isinstance(signing_key, str) or not signing_key.strip():
         raise StreamTokenError("Stream signing key is not configured.")
     return hmac.new(
         signing_key.encode("utf-8"),
-        signing_domain,
+        _SIGNING_DOMAIN,
         hashlib.sha256,
     ).digest()
 
@@ -87,13 +79,11 @@ def _validate_claim_id(value: Any, *, field_name: str) -> str:
     return value
 
 
-def _issue_scoped_token(
+def issue_stream_token(
     *,
     session_id: str,
     owner_id: str,
     signing_key: str,
-    scope: TokenScope,
-    signing_domain: bytes,
     ttl_seconds: int = STREAM_TOKEN_TTL_SECONDS,
     now: datetime | None = None,
 ) -> str:
@@ -111,7 +101,7 @@ def _issue_scoped_token(
             f"{STREAM_TOKEN_TTL_SECONDS}."
         )
 
-    hmac_key = _derive_hmac_key(signing_key, signing_domain=signing_domain)
+    hmac_key = _derive_hmac_key(signing_key)
     iat = _normalize_epoch_seconds(now)
     exp = iat + ttl_seconds
 
@@ -119,7 +109,7 @@ def _issue_scoped_token(
         "exp": exp,
         "iat": iat,
         "owner_id": valid_owner_id,
-        "scope": scope,
+        "scope": STREAM_TOKEN_SCOPE,
         "session_id": valid_session_id,
     }
     payload_bytes = json.dumps(
@@ -134,20 +124,15 @@ def _issue_scoped_token(
     return f"{STREAM_TOKEN_VERSION}.{payload_b64}.{sig_b64}"
 
 
-def _verify_scoped_token(
+def verify_stream_token(
     token: str,
     *,
     expected_session_id: str,
-    expected_scope: TokenScope,
     signing_key: str,
-    signing_domain: bytes,
-    expected_owner_id: str | None = None,
     now: datetime | None = None,
 ) -> StreamTokenClaims:
-    """Verify signature, lifetime, scope, and session binding for a scoped token."""
+    """Verify signature, lifetime, scope, and session binding for a stream token."""
     _validate_claim_id(expected_session_id, field_name="session_id")
-    if expected_owner_id is not None:
-        _validate_claim_id(expected_owner_id, field_name="owner_id")
     if not isinstance(token, str) or not token:
         raise StreamTokenError("Missing stream token.")
 
@@ -156,7 +141,7 @@ def _verify_scoped_token(
         raise StreamTokenError("Invalid stream token format.")
 
     _, payload_b64, sig_b64 = parts
-    hmac_key = _derive_hmac_key(signing_key, signing_domain=signing_domain)
+    hmac_key = _derive_hmac_key(signing_key)
     sig_input = f"{STREAM_TOKEN_VERSION}.{payload_b64}".encode("ascii")
     expected_sig_b64 = _b64url_encode(
         hmac.new(hmac_key, sig_input, hashlib.sha256).digest()
@@ -177,7 +162,7 @@ def _verify_scoped_token(
     if set(payload.keys()) != expected_keys:
         raise StreamTokenError("Invalid stream token claims.")
 
-    if payload.get("scope") != expected_scope:
+    if payload.get("scope") != STREAM_TOKEN_SCOPE:
         raise StreamTokenError("Invalid stream token scope.")
 
     claim_session_id = _validate_claim_id(
@@ -187,10 +172,6 @@ def _verify_scoped_token(
         raise StreamTokenError("Stream token session mismatch.")
 
     claim_owner_id = _validate_claim_id(payload.get("owner_id"), field_name="owner_id")
-    if expected_owner_id is not None and not hmac.compare_digest(
-        claim_owner_id, expected_owner_id
-    ):
-        raise StreamTokenError("Stream token owner mismatch.")
 
     iat = payload.get("iat")
     exp = payload.get("exp")
@@ -215,85 +196,7 @@ def _verify_scoped_token(
     return StreamTokenClaims(
         session_id=claim_session_id,
         owner_id=claim_owner_id,
-        scope=expected_scope,
+        scope="stream",
         iat=iat,
         exp=exp,
-    )
-
-
-def issue_stream_token(
-    *,
-    session_id: str,
-    owner_id: str,
-    signing_key: str,
-    ttl_seconds: int = STREAM_TOKEN_TTL_SECONDS,
-    now: datetime | None = None,
-) -> str:
-    """Issue a short-lived, session-scoped HMAC token for WebSocket streaming."""
-    return _issue_scoped_token(
-        session_id=session_id,
-        owner_id=owner_id,
-        signing_key=signing_key,
-        scope=STREAM_TOKEN_SCOPE,
-        signing_domain=_SIGNING_DOMAIN,
-        ttl_seconds=ttl_seconds,
-        now=now,
-    )
-
-
-def verify_stream_token(
-    token: str,
-    *,
-    expected_session_id: str,
-    signing_key: str,
-    now: datetime | None = None,
-) -> StreamTokenClaims:
-    """Verify signature, lifetime, scope, and session binding for a stream token."""
-    return _verify_scoped_token(
-        token,
-        expected_session_id=expected_session_id,
-        expected_scope=STREAM_TOKEN_SCOPE,
-        signing_key=signing_key,
-        signing_domain=_SIGNING_DOMAIN,
-        now=now,
-    )
-
-
-def issue_view_token(
-    *,
-    session_id: str,
-    owner_id: str,
-    signing_key: str,
-    ttl_seconds: int = STREAM_TOKEN_TTL_SECONDS,
-    now: datetime | None = None,
-) -> str:
-    """Issue a short-lived, session-scoped HMAC token for live-view access."""
-    return _issue_scoped_token(
-        session_id=session_id,
-        owner_id=owner_id,
-        signing_key=signing_key,
-        scope=VIEW_TOKEN_SCOPE,
-        signing_domain=_VIEW_SIGNING_DOMAIN,
-        ttl_seconds=ttl_seconds,
-        now=now,
-    )
-
-
-def verify_view_token(
-    token: str,
-    *,
-    expected_session_id: str,
-    signing_key: str,
-    expected_owner_id: str | None = None,
-    now: datetime | None = None,
-) -> StreamTokenClaims:
-    """Verify signature, lifetime, scope, session, and owner for a view token."""
-    return _verify_scoped_token(
-        token,
-        expected_session_id=expected_session_id,
-        expected_scope=VIEW_TOKEN_SCOPE,
-        signing_key=signing_key,
-        signing_domain=_VIEW_SIGNING_DOMAIN,
-        expected_owner_id=expected_owner_id,
-        now=now,
     )

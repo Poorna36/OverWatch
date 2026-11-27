@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -18,13 +18,7 @@ from control_plane.api.deps import (
 )
 from control_plane.api.main import app
 from control_plane.api.stream import get_stream_clock
-from control_plane.api.stream_tokens import (
-    StreamTokenError,
-    issue_stream_token,
-    issue_view_token,
-    verify_stream_token,
-    verify_view_token,
-)
+from control_plane.api.stream_tokens import verify_stream_token
 from control_plane.contracts import ErrorCode
 from control_plane.db.models import SessionModel
 from control_plane.db.session import create_db_engine, create_session_factory, init_db
@@ -215,8 +209,8 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
         "profile",
         "created_at",
         "stream_url",
-        "view_url",
     }
+    assert "view_url" not in body
     assert body["session_id"] == SESSION_ACTIVE
     assert body["state"] == "ACTIVE"
     assert body["profile"] == "coding"
@@ -236,43 +230,12 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
     assert claims.owner_id == owner_id
     assert claims.session_id == SESSION_ACTIVE
 
-    parsed_view = urlsplit(body["view_url"])
-    assert parsed_view.scheme == "https"
-    assert parsed_view.netloc == "overwatch.example.com:8443"
-    assert parsed_view.path == f"/api/v1/sessions/{SESSION_ACTIVE}/view"
-    view_token = parse_qs(parsed_view.query)["token"][0]
-    view_claims = verify_view_token(
-        view_token,
-        expected_session_id=SESSION_ACTIVE,
-        signing_key=TEST_TOKEN,
-        now=BASE_NOW,
-    )
-    assert view_claims.owner_id == owner_id
-    assert view_claims.session_id == SESSION_ACTIVE
-    assert view_claims.scope == "view"
-
-    with pytest.raises(StreamTokenError):
-        verify_stream_token(
-            view_token,
-            expected_session_id=SESSION_ACTIVE,
-            signing_key=TEST_TOKEN,
-            now=BASE_NOW,
-        )
-    with pytest.raises(StreamTokenError):
-        verify_view_token(
-            token,
-            expected_session_id=SESSION_ACTIVE,
-            signing_key=TEST_TOKEN,
-            now=BASE_NOW,
-        )
-
-    # Verify tokens & raw APP_TOKEN never appeared in logs
+    # Verify token & raw APP_TOKEN never appeared in logs
     log_text = "\n".join(rec.getMessage() for rec in caplog.records)
     assert token not in log_text
-    assert view_token not in log_text
     assert TEST_TOKEN not in log_text
 
-    # Also verify http -> ws / http scheme conversion with path prefix
+    # Also verify http -> ws scheme conversion with path prefix
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://127.0.0.1:8000/proxy/")
     resp_ws = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}", headers=headers)
     assert resp_ws.status_code == 200
@@ -280,10 +243,6 @@ def test_active_session_issues_verified_stream_url_without_logging_token(
     assert parsed_ws.scheme == "ws"
     assert parsed_ws.netloc == "127.0.0.1:8000"
     assert parsed_ws.path == f"/proxy/api/v1/sessions/{SESSION_ACTIVE}/stream"
-    parsed_http_view = urlsplit(resp_ws.json()["view_url"])
-    assert parsed_http_view.scheme == "http"
-    assert parsed_http_view.netloc == "127.0.0.1:8000"
-    assert parsed_http_view.path == f"/proxy/api/v1/sessions/{SESSION_ACTIVE}/view"
 
 
 @pytest.mark.parametrize("inactive_state", ["ENDING", "ENDED", "FAILED"])
@@ -468,94 +427,6 @@ def test_list_sessions_isolates_owner_shape_and_orders_newest_first(
         assert "stream_url" not in item
         assert "view_url" not in item
         assert "request_text" not in item
-
-
-def test_live_view_route_validates_token_scope_expiry_session_owner_and_state(
-    read_api_env: dict[str, Any],
-) -> None:
-    client: TestClient = read_api_env["client"]
-    factory = read_api_env["factory"]
-    owner_id: str = read_api_env["owner_id"]
-
-    # Missing token
-    missing = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view")
-    assert missing.status_code == 401
-    assert missing.json()["error"]["code"] == ErrorCode.AUTH_ERROR.value
-
-    # Wrong scope (stream token rejected by view route)
-    stream_tok = issue_stream_token(
-        session_id=SESSION_ACTIVE,
-        owner_id=owner_id,
-        signing_key=TEST_TOKEN,
-        now=BASE_NOW,
-    )
-    wrong_scope = client.get(
-        f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={stream_tok}"
-    )
-    assert wrong_scope.status_code == 401
-    assert wrong_scope.json()["error"]["code"] == ErrorCode.AUTH_ERROR.value
-    assert stream_tok not in wrong_scope.text
-
-    # Expired token
-    expired_tok = issue_view_token(
-        session_id=SESSION_ACTIVE,
-        owner_id=owner_id,
-        signing_key=TEST_TOKEN,
-        ttl_seconds=60,
-        now=BASE_NOW - timedelta(minutes=5),
-    )
-    expired = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={expired_tok}")
-    assert expired.status_code == 401
-    assert expired.json()["error"]["code"] == ErrorCode.AUTH_ERROR.value
-
-    # Wrong session token
-    wrong_session_tok = issue_view_token(
-        session_id=SESSION_OTHER,
-        owner_id=owner_id,
-        signing_key=TEST_TOKEN,
-        now=BASE_NOW,
-    )
-    wrong_sess = client.get(
-        f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={wrong_session_tok}"
-    )
-    assert wrong_sess.status_code == 401
-    assert wrong_sess.json()["error"]["code"] == ErrorCode.AUTH_ERROR.value
-
-    # Wrong owner token -> identical 404 SESSION_INACTIVE
-    wrong_owner_tok = issue_view_token(
-        session_id=SESSION_ACTIVE,
-        owner_id="owner_other",
-        signing_key=TEST_TOKEN,
-        now=BASE_NOW,
-    )
-    wrong_owner = client.get(
-        f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={wrong_owner_tok}"
-    )
-    assert wrong_owner.status_code == 404
-    assert wrong_owner.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value
-
-    # Valid token on active owned session fails closed with 501 (isolation blocker)
-    valid_tok = issue_view_token(
-        session_id=SESSION_ACTIVE,
-        owner_id=owner_id,
-        signing_key=TEST_TOKEN,
-        now=BASE_NOW,
-    )
-    active_resp = client.get(
-        f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={valid_tok}"
-    )
-    assert active_resp.status_code == 501
-    assert active_resp.json()["error"]["code"] == ErrorCode.UPSTREAM_ERROR.value
-
-    # Inactive session rejects even a valid token with 409 SESSION_INACTIVE
-    with factory() as db:
-        row = db.get(SessionModel, SESSION_ACTIVE)
-        assert row is not None
-        row.state = "ENDED"
-        db.commit()
-    ended_resp = client.get(f"/api/v1/sessions/{SESSION_ACTIVE}/view?token={valid_tok}")
-    assert ended_resp.status_code == 409
-    assert ended_resp.json()["error"]["code"] == ErrorCode.SESSION_INACTIVE.value
 
 
 def test_screenshot_route_auth_ownership_inactive_and_jpeg_output(
