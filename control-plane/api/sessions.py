@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -20,12 +22,18 @@ from control_plane.api.deps import (
     require_owner_id,
 )
 from control_plane.api.stream import ACTIVE_STREAM_STATES, get_stream_clock
-from control_plane.api.stream_tokens import StreamTokenError, issue_stream_token
+from control_plane.api.stream_tokens import (
+    StreamTokenClaims,
+    StreamTokenError,
+    issue_stream_token,
+    issue_view_token,
+    verify_view_token,
+)
 from control_plane.audit.audit_writer import format_utc_iso
 from control_plane.contracts import ErrorCode, SessionSummary
 from control_plane.db.models import SessionModel
 from control_plane.events.event_bus import EventBus, EventBusError
-from control_plane.gateway.mcp_runtime import McpRuntimeError
+from control_plane.gateway.mcp_runtime import McpRuntimeError, SessionMcpRuntime
 from control_plane.sessions.container_manager import (
     ContainerManagerError,
     SessionContainerManager,
@@ -36,7 +44,17 @@ from control_plane.sessions.session_runner import (
     SessionStartupError,
     SessionValidationError,
 )
-from fastapi import APIRouter, Depends, Response
+from fastapi import (
+    APIRouter,
+    Depends,
+    Query,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -48,15 +66,39 @@ _WS_SCHEME_MAP: dict[str, str] = {
     "http": "ws",
     "https": "wss",
 }
+_HTTP_SCHEME_MAP: dict[str, str] = {
+    "http": "http",
+    "https": "https",
+}
+_VIEW_COOKIE_NAME = "overwatch_view"
+_VIEW_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' data:; "
+    "connect-src 'self' ws: wss:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'self'"
+)
 
 
-def build_stream_ws_url(
+def get_public_view_base_url() -> str | None:
+    """Return optional dedicated origin for live-view URLs."""
+    raw = os.environ.get("PUBLIC_VIEW_BASE_URL")
+    return raw if raw and raw.strip() else None
+
+
+def _build_public_session_url(
     public_base_url: str | None,
     *,
     session_id: str,
+    suffix: str,
     token: str,
+    scheme_map: dict[str, str],
 ) -> str:
-    """Validate ``public_base_url`` and build the authenticated WebSocket stream URL."""
+    """Validate ``public_base_url`` and build a tokenized session URL."""
     if not isinstance(public_base_url, str) or not public_base_url.strip():
         raise ApiError(
             500,
@@ -74,8 +116,8 @@ def build_stream_ws_url(
         )
 
     parsed = urlsplit(public_base_url)
-    ws_scheme = _WS_SCHEME_MAP.get(parsed.scheme.lower())
-    if ws_scheme is None or not parsed.netloc or not parsed.hostname:
+    target_scheme = scheme_map.get(parsed.scheme.lower())
+    if target_scheme is None or not parsed.netloc or not parsed.hostname:
         raise ApiError(
             500,
             ErrorCode.UPSTREAM_ERROR,
@@ -97,7 +139,42 @@ def build_stream_ws_url(
         )
 
     base_path = parsed.path.rstrip("/")
-    return f"{ws_scheme}://{parsed.netloc}{base_path}/api/v1/sessions/{session_id}/stream?token={token}"
+    return (
+        f"{target_scheme}://{parsed.netloc}{base_path}"
+        f"/api/v1/sessions/{session_id}/{suffix}?token={token}"
+    )
+
+
+def build_stream_ws_url(
+    public_base_url: str | None,
+    *,
+    session_id: str,
+    token: str,
+) -> str:
+    """Validate ``public_base_url`` and build the authenticated WebSocket stream URL."""
+    return _build_public_session_url(
+        public_base_url,
+        session_id=session_id,
+        suffix="stream",
+        token=token,
+        scheme_map=_WS_SCHEME_MAP,
+    )
+
+
+def build_view_url(
+    public_base_url: str | None,
+    *,
+    session_id: str,
+    token: str,
+) -> str:
+    """Validate ``public_base_url`` and build the authenticated live-view URL."""
+    return _build_public_session_url(
+        public_base_url,
+        session_id=session_id,
+        suffix="view",
+        token=token,
+        scheme_map=_HTTP_SCHEME_MAP,
+    )
 
 
 def _parse_created_at_utc(raw: str) -> datetime:
@@ -260,27 +337,38 @@ def get_session_detail(
                 ErrorCode.AUTH_ERROR,
                 "Authentication is not configured.",
             )
+        now = clock()
         try:
-            token = issue_stream_token(
+            stream_token = issue_stream_token(
                 session_id=row.session_id,
                 owner_id=owner_id,
                 signing_key=configured_token,
-                now=clock(),
+                now=now,
+            )
+            view_token = issue_view_token(
+                session_id=row.session_id,
+                owner_id=owner_id,
+                signing_key=configured_token,
+                now=now,
             )
         except StreamTokenError as exc:
             raise ApiError(
                 500,
                 ErrorCode.UPSTREAM_ERROR,
-                f"Failed to issue stream token: {exc}",
+                f"Failed to issue session access token: {exc}",
             ) from exc
 
         payload["stream_url"] = build_stream_ws_url(
             public_base_url,
             session_id=row.session_id,
-            token=token,
+            token=stream_token,
+        )
+        payload["view_url"] = build_view_url(
+            get_public_view_base_url() or public_base_url,
+            session_id=row.session_id,
+            token=view_token,
         )
 
-    # view_url is omitted until a secure live-view bridge is implemented.
     return payload
 
 
@@ -694,3 +782,232 @@ async def get_session_screenshot(
         media_type="image/jpeg",
         headers={"Cache-Control": "no-store"},
     )
+
+
+def _authorize_view_access(
+    *,
+    session_id: str,
+    token_query: str,
+    cookie_token: str | None,
+    configured_token: str | None,
+    session_factory: sessionmaker[Session],
+    session_runner: SessionRunner,
+    now: datetime,
+) -> tuple[StreamTokenClaims, str, SessionMcpRuntime]:
+    """Validate view token/cookie, ownership, active state, and live runtime."""
+    if not configured_token:
+        raise ApiError(
+            401,
+            ErrorCode.AUTH_ERROR,
+            "Authentication is not configured.",
+        )
+
+    raw_token = token_query or (cookie_token or "")
+    if not raw_token:
+        raise ApiError(401, ErrorCode.AUTH_ERROR, "Missing view token.")
+
+    try:
+        claims = verify_view_token(
+            raw_token,
+            expected_session_id=session_id,
+            signing_key=configured_token,
+            now=now,
+        )
+    except StreamTokenError as exc:
+        raise ApiError(
+            401,
+            ErrorCode.AUTH_ERROR,
+            f"Invalid view token: {exc}",
+        ) from exc
+
+    row = _load_owned_session_row(session_factory, session_id, claims.owner_id)
+    if row.state not in ACTIVE_STREAM_STATES:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' is not active (state={row.state}).",
+        )
+
+    runtime = session_runner.get_runtime(session_id)
+    if runtime is None:
+        raise ApiError(
+            409,
+            ErrorCode.SESSION_INACTIVE,
+            f"Session '{session_id}' runtime is not active.",
+        )
+
+    return claims, raw_token, runtime
+
+
+@router.get("/sessions/{session_id}/view")
+async def get_session_view_entry(
+    session_id: str,
+    request: Request,
+    token: str = Query(default=""),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+    configured_token: str | None = Depends(get_app_token),
+    clock: Callable[[], datetime] = Depends(get_stream_clock),
+) -> RedirectResponse:
+    """Exchange a view-scoped query token for a path-scoped HttpOnly view cookie."""
+    claims, raw_token, _runtime = await anyio.to_thread.run_sync(
+        partial(
+            _authorize_view_access,
+            session_id=session_id,
+            token_query=token,
+            cookie_token=None,
+            configured_token=configured_token,
+            session_factory=session_factory,
+            session_runner=session_runner,
+            now=clock(),
+        )
+    )
+    max_age = max(1, claims.exp - int(clock().timestamp()))
+    target = request.url_for(
+        "get_session_view_asset", session_id=session_id, asset_path="vnc.html"
+    )
+    response = RedirectResponse(
+        url=str(target.path),
+        status_code=status.HTTP_302_FOUND,
+        headers={"Cache-Control": "no-store"},
+    )
+    response.set_cookie(
+        key=_VIEW_COOKIE_NAME,
+        value=raw_token,
+        max_age=max_age,
+        path=f"/api/v1/sessions/{session_id}/view",
+        httponly=True,
+        samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
+
+
+@router.get("/sessions/{session_id}/view/{asset_path:path}")
+async def get_session_view_asset(
+    session_id: str,
+    asset_path: str,
+    request: Request,
+    token: str = Query(default=""),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+    configured_token: str | None = Depends(get_app_token),
+    clock: Callable[[], datetime] = Depends(get_stream_clock),
+) -> Response:
+    """Serve immutable KasmVNC UI assets from the read-only container rootfs."""
+    _, _, runtime = await anyio.to_thread.run_sync(
+        partial(
+            _authorize_view_access,
+            session_id=session_id,
+            token_query=token,
+            cookie_token=request.cookies.get(_VIEW_COOKIE_NAME),
+            configured_token=configured_token,
+            session_factory=session_factory,
+            session_runner=session_runner,
+            now=clock(),
+        )
+    )
+
+    try:
+        content, media_type = await anyio.to_thread.run_sync(
+            runtime.read_view_asset, asset_path
+        )
+    except McpRuntimeError as exc:
+        raise ApiError(
+            404,
+            ErrorCode.UPSTREAM_ERROR,
+            f"View asset unavailable: {exc}",
+        ) from exc
+
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "SAMEORIGIN",
+            "Content-Security-Policy": _VIEW_CSP,
+        },
+    )
+
+
+@router.websocket("/sessions/{session_id}/view/websockify")
+async def session_view_websockify(
+    websocket: WebSocket,
+    session_id: str,
+    token: str = Query(default=""),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    session_runner: SessionRunner = Depends(get_session_runner),
+    configured_token: str | None = Depends(get_app_token),
+    clock: Callable[[], datetime] = Depends(get_stream_clock),
+) -> None:
+    """Proxy authenticated KasmVNC WebSocket traffic over docker-exec."""
+    try:
+        _, _, runtime = await anyio.to_thread.run_sync(
+            partial(
+                _authorize_view_access,
+                session_id=session_id,
+                token_query=token,
+                cookie_token=websocket.cookies.get(_VIEW_COOKIE_NAME),
+                configured_token=configured_token,
+                session_factory=session_factory,
+                session_runner=session_runner,
+                now=clock(),
+            )
+        )
+    except ApiError:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        bridge = await anyio.to_thread.run_sync(runtime.open_view_ws_bridge)
+    except McpRuntimeError:
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return
+
+    requested_proto = websocket.headers.get("sec-websocket-protocol", "")
+    subprotocol = "binary" if "binary" in requested_proto.lower() else None
+    await websocket.accept(subprotocol=subprotocol)
+
+    async def _pump_upstream_to_client() -> None:
+        while True:
+            frame = await anyio.to_thread.run_sync(bridge.recv_frame)
+            if frame is None:
+                break
+            opcode, data = frame
+            if opcode == 0x1:
+                await websocket.send_text(data.decode("utf-8", errors="replace"))
+            else:
+                await websocket.send_bytes(data)
+
+    async def _pump_client_to_upstream() -> None:
+        while True:
+            message = await websocket.receive()
+            msg_type = message.get("type")
+            if msg_type == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                await anyio.to_thread.run_sync(bridge.send_frame, 0x2, message["bytes"])
+            elif message.get("text") is not None:
+                await anyio.to_thread.run_sync(
+                    bridge.send_frame, 0x1, message["text"].encode("utf-8")
+                )
+
+    upstream_task = asyncio.create_task(_pump_upstream_to_client())
+    client_task = asyncio.create_task(_pump_client_to_upstream())
+    try:
+        _, pending = await asyncio.wait(
+            {upstream_task, client_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        for task in (upstream_task, client_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(upstream_task, client_task, return_exceptions=True)
+        await anyio.to_thread.run_sync(bridge.close)

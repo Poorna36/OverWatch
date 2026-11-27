@@ -175,6 +175,20 @@ def test_session_mcp_runtime_executes_hardened_container_tools(
         jpeg_bytes = runtime.capture_screenshot_jpeg()
         assert jpeg_bytes.startswith(b"\xff\xd8\xff")
         assert len(jpeg_bytes) > 100
+
+        html_bytes, html_mime = runtime.read_view_asset("vnc.html")
+        assert html_mime.startswith("text/html")
+        assert b"KasmVNC" in html_bytes
+
+        bridge = runtime.open_view_ws_bridge()
+        try:
+            frame = bridge.recv_frame()
+            assert frame is not None
+            opcode, payload = frame
+            assert opcode == 0x2
+            assert payload.startswith(b"RFB ")
+        finally:
+            bridge.close()
     finally:
         runtime.close()
         engine.dispose()
