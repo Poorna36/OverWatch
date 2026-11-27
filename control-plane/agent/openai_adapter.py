@@ -26,6 +26,7 @@ from control_plane.agent.llm import (
     LlmMessage,
     LlmToolCall,
     LlmTurnResponse,
+    LlmUsage,
     ToolDefinition,
 )
 from openai import OpenAI
@@ -206,10 +207,34 @@ def _strip_optional_nulls(
     return cleaned
 
 
+def _extract_usage(response: Any, model: str | None) -> LlmUsage | None:
+    raw_usage = getattr(response, "usage", None)
+    if raw_usage is None:
+        return None
+    in_tok = getattr(raw_usage, "input_tokens", None)
+    out_tok = getattr(raw_usage, "output_tokens", None)
+    if (
+        isinstance(in_tok, int)
+        and not isinstance(in_tok, bool)
+        and isinstance(out_tok, int)
+        and not isinstance(out_tok, bool)
+        and in_tok >= 0
+        and out_tok >= 0
+    ):
+        resp_model = getattr(response, "model", None) or model
+        return LlmUsage(
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            model=str(resp_model) if resp_model else None,
+        )
+    return None
+
+
 def _parse_responses_output(
     response: Any,
     wire_to_contract: dict[str, str],
     tools_by_name: dict[str, ToolDefinition],
+    model: str | None = None,
 ) -> LlmTurnResponse:
     """Translate an OpenAI ``Response`` object into ``LlmTurnResponse``."""
     resp_error = getattr(response, "error", None)
@@ -296,6 +321,7 @@ def _parse_responses_output(
     return LlmTurnResponse(
         tool_calls=tuple(tool_calls),
         assistant_text=assistant_text or None,
+        usage=_extract_usage(response, model),
     )
 
 
@@ -377,4 +403,6 @@ class OpenAIResponsesAdapter:
                 f"OpenAI SDK error ({type(exc).__name__}): {exc}"
             ) from exc
 
-        return _parse_responses_output(response, wire_to_contract, tools_by_name)
+        return _parse_responses_output(
+            response, wire_to_contract, tools_by_name, model=self._model
+        )

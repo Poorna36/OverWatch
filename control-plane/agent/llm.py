@@ -47,11 +47,21 @@ class LlmMessage:
 
 
 @dataclass(frozen=True)
+class LlmUsage:
+    """Provider-reported token usage for one LLM inference turn."""
+
+    input_tokens: int
+    output_tokens: int
+    model: str | None = None
+
+
+@dataclass(frozen=True)
 class LlmTurnResponse:
     """Structured result from one LLM inference turn."""
 
     tool_calls: tuple[LlmToolCall, ...] = ()
     assistant_text: str | None = None
+    usage: LlmUsage | None = None
 
 
 class LlmAdapter(Protocol):

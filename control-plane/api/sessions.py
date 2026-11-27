@@ -925,6 +925,27 @@ def apply_dry_run_route(
     return {"applied": res.applied, "flagged": res.flagged}
 
 
+@router.get("/budget/{session_id}")
+def get_session_budget_route(
+    session_id: str,
+    owner_id: str = Depends(require_owner_id),
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    event_bus: EventBus = Depends(get_event_bus),
+) -> dict[str, Any]:
+    """Return the latest recorded F-17 budget meter snapshot for an owned session."""
+    _load_owned_session_row(session_factory, session_id, owner_id)
+    events = event_bus.replay(session_id=session_id)
+    budget_events = [e for e in events if e.type == "budget"]
+    if not budget_events:
+        return {
+            "calls_used": 0,
+            "calls_max": None,
+            "usd_used": None,
+            "usd_max": None,
+        }
+    return dict(budget_events[-1].data)
+
+
 @router.get("/sessions/{session_id}/screenshot")
 async def get_session_screenshot(
     session_id: str,

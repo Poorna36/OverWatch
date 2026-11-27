@@ -369,7 +369,7 @@ def test_max_tool_calls_budget_enforced_and_fails_safely(loop_env: dict) -> None
     events = loop_env["event_bus"].replay(session_id=SESSION_ID)
     budget_events = [e for e in events if e.type == "budget"]
     assert budget_events[-1].data["calls_used"] == 1
-    assert budget_events[-1].data["usd_used"] == 0.0
+    assert budget_events[-1].data["usd_used"] is None
     assert events[-2].type == "blocked"
     assert events[-2].data["code"] == ErrorCode.BUDGET_EXCEEDED
 

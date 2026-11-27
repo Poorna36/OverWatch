@@ -21,6 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from control_plane.agent.budget import (
+    BudgetAccountingError,
+    BudgetMeter,
+    ModelPricing,
+    load_pricing_from_env,
+)
 from control_plane.agent.failure_handler import (
     DEFAULT_MAX_TRANSIENT_RETRIES,
     LoopBreaker,
@@ -257,6 +263,7 @@ def _emit_budget_event(
     session_id: str,
     calls_used: int,
     calls_max: int,
+    usd_used: float | None,
     usd_max: float,
 ) -> None:
     _emit_event(
@@ -266,7 +273,7 @@ def _emit_budget_event(
         data={
             "calls_used": calls_used,
             "calls_max": calls_max,
-            "usd_used": 0.0,
+            "usd_used": usd_used,
             "usd_max": usd_max,
         },
     )
@@ -291,6 +298,8 @@ class AgentLoop:
         file_reader: FileReader | None = None,
         dry_run: bool = False,
         dry_run_manager: DryRunManager | None = None,
+        pricing: Mapping[str, ModelPricing] | None = None,
+        require_usd_accounting: bool | None = None,
     ) -> None:
         self._llm = llm
         self._coordinator = coordinator
@@ -306,6 +315,20 @@ class AgentLoop:
         self._dry_run = dry_run
         self._dry_run_manager = dry_run_manager
         self._loop_breaker = LoopBreaker()
+        resolved_pricing = (
+            dict(pricing) if pricing is not None else load_pricing_from_env()
+        )
+        strict_usd = (
+            require_usd_accounting
+            if require_usd_accounting is not None
+            else bool(resolved_pricing)
+        )
+        self._budget_meter = BudgetMeter(
+            calls_max=profile.budget.max_tool_calls,
+            usd_max=profile.budget.max_usd,
+            pricing=resolved_pricing,
+            require_usd_accounting=strict_usd,
+        )
 
     def run(
         self,
@@ -937,6 +960,67 @@ class AgentLoop:
                     audit_seqs=tuple(audit_seqs),
                 )
 
+            try:
+                self._budget_meter.record_llm_usage(turn.usage)
+            except BudgetAccountingError as exc:
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="error",
+                    error=ErrorBody(
+                        code=ErrorCode.BUDGET_EXCEEDED,
+                        message=str(exc),
+                    ),
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
+            if self._budget_meter.is_usd_exceeded():
+                err = ErrorBody(
+                    code=ErrorCode.BUDGET_EXCEEDED,
+                    message=(
+                        f"Session USD budget exceeded "
+                        f"({self._budget_meter.usd_used:.6f} > "
+                        f"{self._profile.budget.max_usd:.6f})."
+                    ),
+                    details={
+                        "usd_used": self._budget_meter.usd_used,
+                        "usd_max": self._profile.budget.max_usd,
+                    },
+                )
+                try:
+                    _emit_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        event_type="blocked",
+                        data={
+                            "call_id": "budget",
+                            "tool": "budget",
+                            "code": err.code,
+                            "reason": err.message,
+                        },
+                    )
+                    _emit_budget_event(
+                        self._event_bus,
+                        session_id=session_id,
+                        calls_used=calls_used,
+                        calls_max=calls_max,
+                        usd_used=self._budget_meter.usd_used,
+                        usd_max=self._profile.budget.max_usd,
+                    )
+                except EventBusError:
+                    pass
+                return AgentLoopResult(
+                    session_id=session_id,
+                    status="budget_exceeded",
+                    error=err,
+                    calls_used=calls_used,
+                    calls_max=calls_max,
+                    turns=turns,
+                    audit_seqs=tuple(audit_seqs),
+                )
+
             if not turn.tool_calls:
                 final_text = turn.assistant_text or ""
                 if final_text:
@@ -1066,6 +1150,7 @@ class AgentLoop:
                     session_id=session_id,
                     calls_used=calls_used,
                     calls_max=calls_max,
+                    usd_used=self._budget_meter.usd_used,
                     usd_max=self._profile.budget.max_usd,
                 )
             except EventBusError:
@@ -1166,6 +1251,7 @@ class AgentLoop:
                     session_id=session_id,
                     calls_used=new_calls_used,
                     calls_max=calls_max,
+                    usd_used=self._budget_meter.usd_used,
                     usd_max=self._profile.budget.max_usd,
                 )
             except EventBusError:
@@ -1202,6 +1288,7 @@ class AgentLoop:
                 session_id=session_id,
                 calls_used=new_calls_used,
                 calls_max=calls_max,
+                usd_used=self._budget_meter.usd_used,
                 usd_max=self._profile.budget.max_usd,
             )
 
