@@ -454,10 +454,10 @@ def test_persistent_stateful_browser_and_fixed_exec_commands(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# 3. Desktop Xvfb/Openbox Setup (No KasmVNC)
+# 3. Desktop Xvnc/Openbox Setup (Loopback KasmVNC)
 # ---------------------------------------------------------------------------
 def test_desktop_starts_xvfb_and_openbox_and_sets_display() -> None:
-    """Desktop launch ensures Xvfb + openbox (never KasmVNC) and sets DISPLAY."""
+    """Desktop launch ensures loopback Xvnc + openbox and sets DISPLAY."""
     coding_profile = load_profile("coding")
     fake_desktop = MCPServer(name="desktop")
 
@@ -484,32 +484,40 @@ def test_desktop_starts_xvfb_and_openbox_and_sets_display() -> None:
         assert cmds[0] == ["xset", "-display", ":99", "q"]
         assert cmds[1] == ["mkdir", "-p", "-m", "1777", "/tmp/.X11-unix"]
         assert cmds[2] == [
-            "Xvfb",
+            "Xvnc",
             ":99",
-            "-screen",
+            "-geometry",
+            "1280x720",
+            "-depth",
+            "24",
+            "-interface",
+            "127.0.0.1",
+            "-publicIP",
+            "127.0.0.1",
+            "-websocketPort",
+            "6800",
+            "-DisableBasicAuth",
+            "1",
+            "-SecurityTypes",
+            "None",
+            "-sslOnly",
             "0",
-            "1280x720x24",
-            "-nolisten",
-            "tcp",
         ]
         assert cmds[3] == ["xset", "-display", ":99", "q"]
         assert cmds[4] == ["openbox"]
         assert client.exec_creates[4]["environment"] == {"DISPLAY": ":99"}
         assert tuple(cmds[5]) == MCP_SERVER_COMMANDS["desktop"]
         assert client.exec_creates[5]["environment"] == {"DISPLAY": ":99"}
-
-        # Never starts or references KasmVNC
-        assert all("kasm" not in json.dumps(c).lower() for c in cmds)
     finally:
         rt.close()
 
-    # Shutdown cleanly sends TERM to recorded Xvfb/openbox PIDs
+    # Shutdown cleanly sends TERM to recorded Xvnc/openbox PIDs
     kill_cmds = [rec["cmd"] for rec in client.exec_creates if rec["cmd"][0] == "kill"]
     assert len(kill_cmds) == 2
 
 
 def test_desktop_fails_closed_if_xvfb_never_becomes_ready() -> None:
-    """If Xvfb never passes xset readiness check, desktop fails closed."""
+    """If Xvnc never passes xset readiness check, desktop fails closed."""
     coding_profile = load_profile("coding")
     client = _FakeDockerClient(probe_exit_codes={"xset": [1, 1, 1, 1, 1]})
     rt = SessionMcpRuntime(
@@ -519,7 +527,7 @@ def test_desktop_fails_closed_if_xvfb_never_becomes_ready() -> None:
         display_wait_s=0.05,
     )
     try:
-        with pytest.raises(McpTransportError, match="Timed out waiting for Xvfb"):
+        with pytest.raises(McpTransportError, match="Timed out waiting for Xvnc"):
             rt.call_tool("desktop.screenshot", {})
         assert not any(
             tuple(r["cmd"]) == MCP_SERVER_COMMANDS["desktop"]
@@ -846,7 +854,7 @@ def test_capture_screenshot_jpeg_lifecycle_and_validation() -> None:
         frame = runtime.capture_screenshot_jpeg()
         assert frame == fake_jpeg
         cmds = [rec["cmd"][0] for rec in client.exec_creates]
-        assert "Xvfb" in cmds
+        assert "Xvnc" in cmds
         assert "openbox" in cmds
         assert "python3" in cmds
 
@@ -866,3 +874,89 @@ def test_capture_screenshot_jpeg_lifecycle_and_validation() -> None:
 
     with pytest.raises(McpRuntimeClosedError):
         runtime.capture_screenshot_jpeg()
+
+
+def test_read_view_asset_and_ws_bridge_lifecycle() -> None:
+    """read_view_asset blocks traversal/bad types; open_view_ws_bridge relays frames."""
+    import base64
+    import hashlib
+    import struct
+
+    client = _FakeDockerClient()
+    client.probe_exit_codes["xset"] = [1, 0]
+    orig_exec_start = client._exec_start
+    c_sock, s_sock = socket.socketpair()
+
+    def _custom_exec_start(exec_id: str, **kwargs: Any) -> Any:
+        rec = client._exec_records[exec_id]
+        if kwargs.get("socket") and rec["cmd"][0] == "python3":
+            client.exec_starts.append({"exec_id": exec_id, **kwargs})
+            return c_sock
+        if rec["cmd"][0] == "python3":
+            client.exec_starts.append({"exec_id": exec_id, **kwargs})
+            return b"<html>kasm</html>"
+        return orig_exec_start(exec_id, **kwargs)
+
+    client.api.exec_start.side_effect = _custom_exec_start
+
+    def _fake_xvnc_server() -> None:
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += s_sock.recv(4096)
+        key = ""
+        for line in buf.decode("ascii").split("\r\n"):
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+        accept = base64.b64encode(
+            hashlib.sha1(
+                f"{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11".encode("ascii")
+            ).digest()
+        ).decode("ascii")
+        resp = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "Sec-WebSocket-Protocol: binary\r\n\r\n"
+        ).encode("ascii")
+        # Send handshake + one server binary frame wrapped in Docker stdout framing
+        rfb_frame = b"\x82\x0cRFB 003.008\n"
+        s_sock.sendall(encode_docker_frame(1, resp + rfb_frame))
+        # Read masked client frame and echo back
+        hdr = s_sock.recv(2)
+        length = hdr[1] & 0x7F
+        mask = s_sock.recv(4)
+        payload = bytes(b ^ mask[i % 4] for i, b in enumerate(s_sock.recv(length)))
+        echo = bytes([0x82, len(payload)]) + payload
+        s_sock.sendall(encode_docker_frame(1, echo))
+        s_sock.close()
+
+    t = threading.Thread(target=_fake_xvnc_server, daemon=True)
+    t.start()
+
+    rt = SessionMcpRuntime(
+        docker_client=client,
+        session_id=SESSION_ID,
+        profile=load_profile("coding"),
+    )
+    try:
+        body, mime = rt.read_view_asset("")
+        assert body == b"<html>kasm</html>"
+        assert mime.startswith("text/html")
+
+        with pytest.raises(McpTransportError, match="traversal"):
+            rt.read_view_asset("../etc/passwd")
+        with pytest.raises(McpTransportError, match="Unsupported view asset"):
+            rt.read_view_asset("secret.pem")
+
+        bridge = rt.open_view_ws_bridge()
+        assert bridge.recv_frame() == (0x2, b"RFB 003.008\n")
+        bridge.send_frame(0x2, b"ping-rfb")
+        assert bridge.recv_frame() == (0x2, b"ping-rfb")
+    finally:
+        rt.close()
+        t.join(timeout=2.0)
+
+    assert struct.calcsize(">B3xI") == 8
+    with pytest.raises(McpRuntimeClosedError):
+        rt.read_view_asset("vnc.html")
